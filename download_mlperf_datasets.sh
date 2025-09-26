@@ -9,5 +9,5 @@ bash <(curl -s https://raw.githubusercontent.com/mlcommons/r2-downloader/refs/he
   https://inference.mlcommons-storage.org/metadata/deepseek-r1-datasets-fp8-eval.uri
 
 bash <(curl -s https://raw.githubusercontent.com/mlcommons/r2-downloader/refs/heads/main/mlc-r2-downloader.sh) \
-  -d ${DATASET_HOME}/whisper  \
-  https://inference.mlcommons-storage.org/metadata/whisper-model.uri
+  -d ${DATASET_HOME}/whisper \
+  https://inference.mlcommons-storage.org/metadata/whisper-dataset.uri
