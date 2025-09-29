@@ -55,6 +55,7 @@ for ((i=0; i<NUM_MODELS; i++)); do
   PORT=$(python3 -m yq -r ".models[$i].port" < "$CONFIG_FILE")
   PARAMS=$(python3 -m yq -r ".models[$i].params" < "$CONFIG_FILE")
 
+
   # Check if compilation_config exists
 if python3 -m yq -r ".models[$i] | has(\"compilation_config\")" < "$CONFIG_FILE" | grep -q true; then
   COMPILATION=$(python3 -m yq -r ".models[$i].compilation_config" < "$CONFIG_FILE" | jq -c .)
@@ -70,7 +71,16 @@ fi
 
   LOGFILE="vllm_${MODEL//\//_}.log"
 
-  setsid vllm serve "$MODEL" --port "$PORT" ${PARAMS} >"$LOGFILE" 2>&1 &
+  if [[ "$COLLECT_NSYS" == "true" ]]; then
+  	NSYS_LAUNCH_FILE="nsys_${MODEL//\//_}_server"
+	NSYS_LAUNCH_ARGS=$(python3 -m yq -r ".models[$i].profiling.nsys_launch_args // \"\"" < "$CONFIG_FILE")
+  	echo "▶️ Launching vLLM under Nsight Systems: $NSYS_LAUNCH_FILE"
+  	nsys launch ${NSYS_LAUNCH_ARGS} \
+    	vllm serve "$MODEL" --port "$PORT" $PARAMS >"$LOGFILE" 2>&1 &
+	else
+  	setsid vllm serve "$MODEL" --port "$PORT" $PARAMS >"$LOGFILE" 2>&1 &
+  fi
+
   VLLM_PID=$!
   PGID=$(ps -o pgid= $VLLM_PID | tr -d ' ')
   echo "PID=$VLLM_PID, PGID=$PGID"
@@ -100,7 +110,8 @@ fi
     if [[ "$COLLECT_NSYS" == "true" ]]; then
       NSYS_FILE="nsys_${MODEL//\//_}_conc${CONCURRENCY}"
       echo "▶️ Starting Nsight Systems capture: $NSYS_FILE"
-      nsys start --force-overwrite true --output "$NSYS_FILE"
+      NSYS_START_ARGS=$(python3 -m yq -r ".models[$i].profiling.nsys_start_args // \"\"" < "$CONFIG_FILE")
+      nsys start ${NSYS_START_ARGS}   --output "$NSYS_FILE" 
     fi
 
     if ! vllm bench serve \
