@@ -1,0 +1,25 @@
+models:
+  - name: openai/gpt-oss-20b
+    port: 8000
+    params: "--max-model-len 8192 --max-num-seq 512 --async-scheduling --gpu-memory-utilization 0.95"
+    compilation_config: |
+      {
+        "cudagraph_mode": "FULL_DECODE_ONLY",
+        "cudagraph_capture_sizes": [
+          1,2,4,8,16,24,32,40,48,56,64,72,80,88,96,104,
+          112,120,128,136,144,152,160,168,176,184,192,200,
+          208,216,224,232,240,248,256,264,272,280,288,296,
+          304,312,320,328,336,344,352,360,368,376,384,392,
+          400,408,416,424,432,440,448,456,464,472,480,488,
+          496,504,512
+        ]
+      }
+
+bench:
+  concurrencies: [1, 32, 128, 512, 650]
+  input_len: 2000
+  output_len: 200
+  cc_mult: 10
+  result_prefix: results
+  collect_nsys: false
+
