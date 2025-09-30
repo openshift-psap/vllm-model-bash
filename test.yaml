@@ -1,0 +1,26 @@
+
+models:
+  - name: openai/gpt-oss-20b
+    port: 8000
+    params: "--max-model-len 8192 --max-num-seq 512 --async-scheduling --gpu-memory-utilization 0.95 --trust-remote-code --disable-log-requests"
+    compilation_config: '{"cudagraph_mode":"FULL_DECODE_ONLY","cudagraph_capture_sizes":[1,2,4,8,16,512]}'
+    env: 
+      HF_HOME: "/mnt/workspace"
+      TORCH_CUDA_ARCH_LIST: "9.0"
+  - name: openai/gpt-oss-120b
+    port: 8000
+    params: "--max-model-len 8192 --max-num-seq 512 --async-scheduling --gpu-memory-utilization 0.95 --trust-remote-code --disable-log-requests -tp 4"
+    compilation_config: '{"cudagraph_mode":"FULL_DECODE_ONLY","cudagraph_capture_sizes":[1,2,4,8,16,512]}'
+    env: 
+      HF_HOME: "/mnt/workspace"
+      TORCH_CUDA_ARCH_LIST: "9.0"
+
+
+bench:
+  concurrencies: [1, 32]
+  input_len: 2000
+  output_len: 200
+  cc_mult: 10
+  result_prefix: results
+  collect_nsys: false
+

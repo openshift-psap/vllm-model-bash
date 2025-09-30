@@ -64,6 +64,19 @@ fi
   #COMPILATION=$(python3 -m yq -r ".models[$i].compilation_config" < "$CONFIG_FILE")
   #PARAMS="$PARAMS --compilation-config $COMPILATION"
 
+
+  # --- Export model-specific env vars ---
+  NUM_ENV=$(python3 -m yq -r ".models[$i].env | length" < "$CONFIG_FILE" 2>/dev/null || echo 0)
+  if [[ "$NUM_ENV" -gt 0 ]]; then
+  	echo "🌍 Setting env vars for $MODEL"
+  	for key in $(python3 -m yq -r ".models[$i].env | keys_unsorted[]" < "$CONFIG_FILE"); do
+    		val=$(python3 -m yq -r ".models[$i].env[\"$key\"]" < "$CONFIG_FILE")
+    		echo "  export $key=$val"
+    		export $key="$val"
+  	done
+  fi
+
+
   echo "=============================================="
   echo "🚀 Launching vLLM for model $MODEL on port $PORT"
   echo "Params: $PARAMS"
@@ -77,7 +90,7 @@ fi
   	echo "▶️ Launching vLLM under Nsight Systems: $NSYS_LAUNCH_FILE"
   	nsys launch ${NSYS_LAUNCH_ARGS} \
     	vllm serve "$MODEL" --port "$PORT" $PARAMS >"$LOGFILE" 2>&1 &
-	else
+  else
   	setsid vllm serve "$MODEL" --port "$PORT" $PARAMS >"$LOGFILE" 2>&1 &
   fi
 
