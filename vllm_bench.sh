@@ -72,7 +72,7 @@ fi
   LOGFILE="vllm_${MODEL//\//_}.log"
 
   if [[ "$COLLECT_NSYS" == "true" ]]; then
-  	NSYS_LAUNCH_FILE="nsys_${MODEL//\//_}_server"
+  	NSYS_LAUNCH_FILE="nsys_vllm_${MODEL//\//_}_server"
 	NSYS_LAUNCH_ARGS=$(python3 -m yq -r ".models[$i].profiling.nsys_launch_args // \"\"" < "$CONFIG_FILE")
   	echo "▶️ Launching vLLM under Nsight Systems: $NSYS_LAUNCH_FILE"
   	nsys launch ${NSYS_LAUNCH_ARGS} \
@@ -108,7 +108,7 @@ fi
     NSYS_FILE=""
 
     if [[ "$COLLECT_NSYS" == "true" ]]; then
-      NSYS_FILE="nsys_${MODEL//\//_}_conc${CONCURRENCY}"
+      NSYS_FILE="nsys_vllm_${MODEL//\//_}_conc${CONCURRENCY}"
       echo "▶️ Starting Nsight Systems capture: $NSYS_FILE"
       NSYS_START_ARGS=$(python3 -m yq -r ".models[$i].profiling.nsys_start_args // \"\"" < "$CONFIG_FILE")
       nsys start ${NSYS_START_ARGS}   --output "$NSYS_FILE" 
@@ -145,9 +145,15 @@ fi
   done
 
   # Kill server
-  echo "🛑 Killing vLLM server for $MODEL"
-  kill -9 -$PGID || true
-  sleep 30
+  if [[ "$COLLECT_NSYS" == "true" ]]; then
+	pkill -TERM -P ${VLLM_PID} || true   # kill children first
+	kill -TERM ${VLLM_PID} || true       # kill wrapper
+	sleep 5
+  else
+  	echo "🛑 Killing vLLM server for $MODEL"
+  	kill -9 -$PGID || true
+  	sleep 30
+  fi
 done
 
 echo "🎉 All benchmarking completed."
