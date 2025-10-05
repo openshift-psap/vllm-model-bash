@@ -23,4 +23,19 @@ models:
 
       # --- Start Nsight Systems before each concurrency test ---
       nsys_start_args: "--force-overwrite=true --gpu-metrics-devices=0 "
+    result_file: async_schedule.json
+
+  - name: openai/gpt-oss-20b
+    port: 8000
+    params: "--max-model-len 4096 --max-num-seq 128 --gpu-memory-utilization 0.9"
+    profile: true
+    profiling:
+      # --- Wrap vLLM serve in Nsight Systems ---
+      nsys_launch_args: "--trace=cuda,nvtx,osrt --cuda-graph-trace=node "
+
+      # --- Start Nsight Systems before each concurrency test ---
+      nsys_start_args: "--force-overwrite=true --gpu-metrics-devices=0 "
+    result_file: no_async_schedule.json
+
+
 
