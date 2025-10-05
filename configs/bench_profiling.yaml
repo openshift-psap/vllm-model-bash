@@ -1,0 +1,26 @@
+bench:
+  concurrencies: [1, 4]
+  input_len: 512
+  output_len: 128
+  cc_mult: 3
+  result_prefix: results
+  collect_nsys: true
+  profile: true
+  study_dir: "Study_ProfilingTest"
+  env:
+    HF_HOME: "/mnt/workspace"
+    TORCH_CUDA_ARCH_LIST: "9.0"
+    CUDA_VISIBLE_DEVICES: "0"
+
+models:
+  - name: openai/gpt-oss-20b
+    port: 8000
+    params: "--max-model-len 4096 --max-num-seq 128 --async-scheduling --gpu-memory-utilization 0.9"
+    profile: true
+    profiling:
+      # --- Wrap vLLM serve in Nsight Systems ---
+      nsys_launch_args: "--trace=cuda,nvtx,osrt --cuda-graph-trace=node "
+
+      # --- Start Nsight Systems before each concurrency test ---
+      nsys_start_args: "--force-overwrite=true --gpu-metrics-devices=0 "
+
