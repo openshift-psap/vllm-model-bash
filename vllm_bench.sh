@@ -102,11 +102,20 @@ for ((i=0; i<NUM_MODELS; i++)); do
   PORT=$(python3 -m yq -r ".models[$i].port" < "$CONFIG_FILE")
   PARAMS=$(python3 -m yq -r ".models[$i].params // \"\"" < "$CONFIG_FILE")
 
-  # Merge compilation_config if provided (quote JSON to keep it single arg)
-  if [[ "$(python3 -m yq -r ".models[$i] | has(\"compilation_config\")" < "$CONFIG_FILE")" == "true" ]]; then
-    COMPILATION=$(python3 -m yq -r ".models[$i].compilation_config" < "$CONFIG_FILE" | jq -c .)
-    PARAMS="$PARAMS --compilation-config '$COMPILATION'"
+
+  # Safely pass JSON without shell-quoting issues
+  COMPILATION_JSON=$(python3 -m yq -r ".models[$i].compilation_config" < "$CONFIG_FILE" | jq -c . 2>/dev/null)
+  if [[ -n "$COMPILATION_JSON" && "$COMPILATION_JSON" != "null" ]]; then
+  echo "🧩 Using compilation config for $MODEL"
+  echo "$COMPILATION_JSON" | jq . | sed 's/^/    /'
+  # Build PARAMS as an array to preserve exact formatting
+  PARAMS_ARR=($PARAMS)
+  PARAMS_ARR+=(--compilation-config "$COMPILATION_JSON")
+  else
+  PARAMS_ARR=($PARAMS)
   fi
+
+
 
   # Merge per-model configs (override global). Quote to preserve as single token.
   MODEL_PARALLEL=$(python3 -m yq -r ".models[$i].configs.parallel // \"$GLOBAL_PARALLEL\"" < "$CONFIG_FILE")
@@ -209,9 +218,11 @@ EOF
     NSYS_LAUNCH_FILE="${MODEL_DIR}/profiles/nsys_vllm_server"
     echo "▶️ nsys launch → ${NSYS_LAUNCH_FILE}.qdrep (attached; not recording yet)"
     nsys launch ${NSYS_LAUNCH_ARGS} \
-      vllm serve "$MODEL" --port "$PORT" $PARAMS >"$LOGFILE" 2>&1 &
+      vllm serve "$MODEL" --port "$PORT" "${PARAMS_ARR[@]}" >"$LOGFILE" 2>&1 &
+
   else
-    setsid vllm serve "$MODEL" --port "$PORT" $PARAMS >"$LOGFILE" 2>&1 &
+    echo "🧩 Launch command: vllm serve $MODEL --port $PORT ${PARAMS_ARR[@]}"
+    setsid vllm serve "$MODEL" --port "$PORT" "${PARAMS_ARR[@]}" >"$LOGFILE" 2>&1 &
   fi
 
   VLLM_PID=$!
