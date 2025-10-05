@@ -97,6 +97,7 @@ echo "model,model_sig,concurrency,num_prompts,status,runtime_sec,result_file,log
 # 4) Model execution loop (per-model subdirs + env + profiling + summaries)
 ###############################################################################
 for ((i=0; i<NUM_MODELS; i++)); do
+
   MODEL=$(python3 -m yq -r ".models[$i].name" < "$CONFIG_FILE")
   PORT=$(python3 -m yq -r ".models[$i].port" < "$CONFIG_FILE")
   PARAMS=$(python3 -m yq -r ".models[$i].params // \"\"" < "$CONFIG_FILE")
@@ -132,6 +133,28 @@ for ((i=0; i<NUM_MODELS; i++)); do
   NSYS_LAUNCH_ARGS=$(python3 -m yq -r ".models[$i].profiling.nsys_launch_args // \"\"" < "$CONFIG_FILE")
   NSYS_START_ARGS=$(python3 -m yq -r ".models[$i].profiling.nsys_start_args // \"\"" < "$CONFIG_FILE")
 
+  # Build model signature (unique per config) and subdirectories
+  SIG_SRC="${MODEL}|${PORT}|${PARAMS}|${MODEL_PARALLEL}|${MODEL_SCHEDULER}|${MODEL_EPLB}|${NSYS_LAUNCH_ARGS}|${NSYS_START_ARGS}"
+  MODEL_SIG=$(echo -n "$SIG_SRC" | md5sum | cut -c1-8)
+  MODEL_DIR="${STUDY_DIR}/model_${MODEL//\//_}_${MODEL_SIG}"
+  mkdir -p "${MODEL_DIR}"/{logs,results,profiles}
+
+  # File paths (per-model)
+  LOGFILE="${MODEL_DIR}/logs/vllm_server.log"
+  RESULT_PATH="${MODEL_DIR}/results/${MODEL_RESULT_FILE}"
+  PER_MODEL_SUMMARY="${MODEL_DIR}/summary_model.csv"
+  # Per-model summary header
+  echo "model,model_sig,concurrency,num_prompts,status,runtime_sec,result_file,log_file,nsys_file" > "$PER_MODEL_SUMMARY"
+
+  echo "=============================================="
+  echo "🚀 Model: $MODEL"
+  echo "🔑 Signature: $MODEL_SIG"
+  echo "🌐 Port: $PORT"
+  echo "⚙️  Params: $PARAMS"
+  echo "📂 Model dir: $MODEL_DIR"
+  echo "=============================================="
+
+
   # --- Per-model bench overrides (fallback to global) ---
   # Input / output lengths
   M_INPUT_LEN=$(python3 -m yq -r ".models[$i].bench.input_len // \"$INPUT_LEN\"" < "$CONFIG_FILE")
@@ -160,26 +183,6 @@ for ((i=0; i<NUM_MODELS; i++)); do
     RESULT_PATH="${MODEL_DIR}/results/${MODEL_RESULT_PREFIX}_${MODEL//\//_}.json"
   fi
 
-  # Build model signature (unique per config) and subdirectories
-  SIG_SRC="${MODEL}|${PORT}|${PARAMS}|${MODEL_PARALLEL}|${MODEL_SCHEDULER}|${MODEL_EPLB}|${NSYS_LAUNCH_ARGS}|${NSYS_START_ARGS}"
-  MODEL_SIG=$(echo -n "$SIG_SRC" | md5sum | cut -c1-8)
-  MODEL_DIR="${STUDY_DIR}/model_${MODEL//\//_}_${MODEL_SIG}"
-  mkdir -p "${MODEL_DIR}"/{logs,results,profiles}
-
-  # File paths (per-model)
-  LOGFILE="${MODEL_DIR}/logs/vllm_server.log"
-  RESULT_PATH="${MODEL_DIR}/results/${MODEL_RESULT_FILE}"
-  PER_MODEL_SUMMARY="${MODEL_DIR}/summary_model.csv"
-  # Per-model summary header
-  echo "model,model_sig,concurrency,num_prompts,status,runtime_sec,result_file,log_file,nsys_file" > "$PER_MODEL_SUMMARY"
-
-  echo "=============================================="
-  echo "🚀 Model: $MODEL"
-  echo "🔑 Signature: $MODEL_SIG"
-  echo "🌐 Port: $PORT"
-  echo "⚙️  Params: $PARAMS"
-  echo "📂 Model dir: $MODEL_DIR"
-  echo "=============================================="
 
   # Per-model manifest
   cat > "${MODEL_DIR}/manifest_model.json" <<EOF
