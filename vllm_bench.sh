@@ -178,7 +178,6 @@ EOF
     NSYS_LAUNCH_FILE="${MODEL_DIR}/profiles/nsys_vllm_server"
     echo "▶️ nsys launch → ${NSYS_LAUNCH_FILE}.qdrep (attached; not recording yet)"
     nsys launch ${NSYS_LAUNCH_ARGS} \
-      --output "${NSYS_LAUNCH_FILE}" \
       vllm serve "$MODEL" --port "$PORT" $PARAMS >"$LOGFILE" 2>&1 &
   else
     setsid vllm serve "$MODEL" --port "$PORT" $PARAMS >"$LOGFILE" 2>&1 &
