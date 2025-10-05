@@ -7,38 +7,38 @@ bench:
   result_prefix: results
   collect_nsys: false
   profile: false
-  study_dir: "Study_GPTOSS_20B_PROFILE"
+  study_dir: "Study_GPTOSS_120B_PROFILE"
   env:
     HF_HOME: "/mnt/workspace"
     TORCH_CUDA_ARCH_LIST: "9.0"
     CUDA_VISIBLE_DEVICES: "0"
 
 models:
-  - name: openai/gpt-oss-20b
+  - name: openai/gpt-oss-120b
     port: 8001
-    params: "--max-model-len 8192 --max-num-seq 512 --gpu-memory-utilization 0.95 --disable-log-requests"
+    params: "--max-model-len 8192 --max-num-seq 512 --gpu-memory-utilization 0.95 --disable-log-requests -tp 4"
     profile: false
     bench:
       concurrencies: [1, 32, 128, 512, 650]
       cc_mult: 10
       input_len: 2000
       output_len: 200
-      result_prefix: "measure_gptoss_20b_default"
+      result_prefix: "measure_gptoss_120b_default"
 
-  - name: openai/gpt-oss-20b
+  - name: openai/gpt-oss-120b
     port: 8001
-    params: "--max-model-len 8192 --max-num-seq 512 --async-scheduling  --gpu-memory-utilization 0.95 --disable-log-requests"
+    params: "--max-model-len 8192 --max-num-seq 512 --async-scheduling  --gpu-memory-utilization 0.95 --disable-log-requests -tp 4"
     profile: false
     bench:
       concurrencies: [1, 32, 128, 512, 650]
       cc_mult: 10
       input_len: 2000
       output_len: 200
-      result_prefix: "measure_gptoss_20b_default_asyncscheduling"
+      result_prefix: "measure_gptoss_120b_default_asyncscheduling"
 
-  - name: openai/gpt-oss-20b
+  - name: openai/gpt-oss-120b
     port: 8000
-    params: "--max-model-len 8192 --max-num-seq 512 --async-scheduling --gpu-memory-utilization 0.95 --disable-log-requests"
+    params: "--max-model-len 8192 --max-num-seq 512 --async-scheduling --gpu-memory-utilization 0.95 --disable-log-requests -tp 4"
     compilation_config: |
       {
         "cudagraph_mode": "FULL_DECODE_ONLY",
@@ -58,11 +58,11 @@ models:
       cc_mult: 10
       input_len: 2000
       output_len: 200
-      result_prefix: "measure_gptoss_20b_asyncschedule_decodeonly"
+      result_prefix: "measure_gptoss_120b_asyncschedule_decodeonly"
 
-  - name: openai/gpt-oss-20b
+  - name: openai/gpt-oss-120b
     port: 8001
-    params: "--max-model-len 8192 --max-num-seq 512 --gpu-memory-utilization 0.95 --disable-log-requests"
+    params: "--max-model-len 8192 --max-num-seq 512 --gpu-memory-utilization 0.95 --disable-log-requests -tp 4"
     compilation_config: |
       {
         "cudagraph_mode": "FULL_DECODE_ONLY",
@@ -82,40 +82,40 @@ models:
       cc_mult: 10
       input_len: 2000
       output_len: 200
-      result_prefix: "measure_gptoss_20b_noasyncschedule_decodeonly"
+      result_prefix: "measure_gptoss_120b_noasyncschedule_decodeonly"
 
-  - name: openai/gpt-oss-20b
+  - name: openai/gpt-oss-120b
     port: 8001
-    params: "--max-model-len 8192 --max-num-seq 512 --gpu-memory-utilization 0.95 --disable-log-requests"
+    params: "--max-model-len 8192 --max-num-seq 512 --gpu-memory-utilization 0.95 --disable-log-requests -tp 4"
     profile: true
     bench:
       concurrencies: [1, 32, 128, 512, 650]
       cc_mult: 10
       input_len: 2000
       output_len: 200
-      result_prefix: "profile_gptoss_20b_default"
+      result_prefix: "profile_gptoss_120b_default"
     profiling:
       nsys_launch_args: "--trace=cuda,nvtx,osrt"
       nsys_start_args: "--force-overwrite=true --gpu-metrics-devices=cuda-visible "
 
 
-  - name: openai/gpt-oss-20b
+  - name: openai/gpt-oss-120b
     port: 8001
-    params: "--max-model-len 8192 --max-num-seq 512 --async-scheduling  --gpu-memory-utilization 0.95 --disable-log-requests"
+    params: "--max-model-len 8192 --max-num-seq 512 --async-scheduling  --gpu-memory-utilization 0.95 --disable-log-requests -tp 4"
     profile: true
     bench:
       concurrencies: [1, 32, 128, 512, 650]
       cc_mult: 10
       input_len: 2000
       output_len: 200
-      result_prefix: "profile_gptoss_20b_default_asyncscheduling"
+      result_prefix: "profile_gptoss_120b_default_asyncscheduling"
     profiling:
       nsys_launch_args: "--trace=cuda,nvtx,osrt"
       nsys_start_args: "--force-overwrite=true --gpu-metrics-devices=cuda-visible "
 
-  - name: openai/gpt-oss-20b
+  - name: openai/gpt-oss-120b
     port: 8000
-    params: "--max-model-len 8192 --max-num-seq 512 --async-scheduling --gpu-memory-utilization 0.95 --disable-log-requests"
+    params: "--max-model-len 8192 --max-num-seq 512 --async-scheduling --gpu-memory-utilization 0.95 --disable-log-requests -tp 4"
     compilation_config: |
       {
         "cudagraph_mode": "FULL_DECODE_ONLY",
@@ -135,15 +135,15 @@ models:
       cc_mult: 10
       input_len: 2000
       output_len: 200
-      result_prefix: "profile_gptoss_20b_asyncschedule_decodeonly"
+      result_prefix: "profile_gptoss_120b_asyncschedule_decodeonly"
     profiling:
       nsys_launch_args: "--trace=cuda,nvtx,osrt"
       nsys_start_args: "--force-overwrite=true --gpu-metrics-devices=cuda-visible "
 
 
-  - name: openai/gpt-oss-20b
+  - name: openai/gpt-oss-120b
     port: 8001
-    params: "--max-model-len 8192 --max-num-seq 512 --gpu-memory-utilization 0.95 --disable-log-requests"
+    params: "--max-model-len 8192 --max-num-seq 512 --gpu-memory-utilization 0.95 --disable-log-requests -tp 4"
     compilation_config: |
       {
         "cudagraph_mode": "FULL_DECODE_ONLY",
@@ -163,7 +163,7 @@ models:
       cc_mult: 10
       input_len: 2000
       output_len: 200
-      result_prefix: "profile_gptoss_20b_noasyncschedule_decodeonly"
+      result_prefix: "profile_gptoss_120b_noasyncschedule_decodeonly"
     profiling:
       nsys_launch_args: "--trace=cuda,nvtx,osrt"
       nsys_start_args: "--force-overwrite=true --gpu-metrics-devices=cuda-visible "
