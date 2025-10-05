@@ -1,0 +1,45 @@
+bench:
+  # --- Global benchmark defaults ---
+  concurrencies: [1, 4]
+  input_len: 512
+  output_len: 128
+  cc_mult: 2
+  result_prefix: results
+  collect_nsys: true
+  profile: true
+  study_dir: "Study_ProfilingValidation"
+  env:
+    HF_HOME: "/mnt/workspace"
+    TORCH_CUDA_ARCH_LIST: "9.0"
+    CUDA_VISIBLE_DEVICES: "0"
+
+models:
+  - name: openai/gpt-oss-20b
+    port: 8000
+    params: "--max-model-len 4096 --max-num-seq 128 --async-scheduling --gpu-memory-utilization 0.9"
+    profile: true
+    bench:
+      concurrencies: [1, 8]
+      cc_mult: 3
+      input_len: 256
+      output_len: 64
+      result_prefix: "profile20b"
+    profiling:
+      # Wrap vLLM server launch
+      nsys_launch_args: "--trace=cuda,nvtx,osrt "
+      # Capture for each concurrency loop
+      nsys_start_args: "--force-overwrite=true --gpu-metrics-devices=cuda-visible "
+
+  - name: openai/gpt-oss-20b
+    port: 8001
+    params: "--max-model-len 8192 --max-num-seq 256 --async-scheduling --gpu-memory-utilization 0.95"
+    profile: true
+    bench:
+      concurrencies: [2]
+      cc_mult: 2
+      input_len: 512
+      output_len: 128
+      result_prefix: "profile20b-something"
+    profiling:
+      nsys_launch_args: "--trace=cuda,nvtx,osrt"
+      nsys_start_args: "--force-overwrite=true --gpu-metrics-devices=cuda-visible "
