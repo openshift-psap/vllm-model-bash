@@ -132,6 +132,34 @@ for ((i=0; i<NUM_MODELS; i++)); do
   NSYS_LAUNCH_ARGS=$(python3 -m yq -r ".models[$i].profiling.nsys_launch_args // \"\"" < "$CONFIG_FILE")
   NSYS_START_ARGS=$(python3 -m yq -r ".models[$i].profiling.nsys_start_args // \"\"" < "$CONFIG_FILE")
 
+  # --- Per-model bench overrides (fallback to global) ---
+  # Input / output lengths
+  M_INPUT_LEN=$(python3 -m yq -r ".models[$i].bench.input_len // \"$INPUT_LEN\"" < "$CONFIG_FILE")
+  M_OUTPUT_LEN=$(python3 -m yq -r ".models[$i].bench.output_len // \"$OUTPUT_LEN\"" < "$CONFIG_FILE")
+
+  # cc_mult
+  M_CC_MULT=$(python3 -m yq -r ".models[$i].bench.cc_mult // \"$CC_MULT\"" < "$CONFIG_FILE")
+
+  # concurrencies (array) – if not present, use global list
+  if python3 -m yq -r ".models[$i].bench.concurrencies | length > 0" < "$CONFIG_FILE" 2>/dev/null | grep -q true; then
+    # read as bash array
+    mapfile -t M_CONCURRENCIES < <(python3 -m yq -r ".models[$i].bench.concurrencies[]" < "$CONFIG_FILE")
+  else
+    M_CONCURRENCIES=("${CONCURRENCIES[@]}")
+  fi
+
+  # result file / prefix resolution (precedence):
+  # 1) models[i].result_file
+  # 2) models[i].bench.result_prefix or models[i].result_prefix
+  # 3) global bench.result_prefix
+  MODEL_RESULT_FILE_EXPLICIT=$(python3 -m yq -r ".models[$i].result_file // \"\"" < "$CONFIG_FILE")
+  if [[ -n "$MODEL_RESULT_FILE_EXPLICIT" && "$MODEL_RESULT_FILE_EXPLICIT" != "null" ]]; then
+    RESULT_PATH="${MODEL_DIR}/results/${MODEL_RESULT_FILE_EXPLICIT}"
+  else
+    MODEL_RESULT_PREFIX=$(python3 -m yq -r ".models[$i].bench.result_prefix // .models[$i].result_prefix // \"$RESULT_PREFIX\"" < "$CONFIG_FILE")
+    RESULT_PATH="${MODEL_DIR}/results/${MODEL_RESULT_PREFIX}_${MODEL//\//_}.json"
+  fi
+
   # Build model signature (unique per config) and subdirectories
   SIG_SRC="${MODEL}|${PORT}|${PARAMS}|${MODEL_PARALLEL}|${MODEL_SCHEDULER}|${MODEL_EPLB}|${NSYS_LAUNCH_ARGS}|${NSYS_START_ARGS}"
   MODEL_SIG=$(echo -n "$SIG_SRC" | md5sum | cut -c1-8)
@@ -196,8 +224,8 @@ EOF
   done
 
   # Bench loop (per concurrency) with optional per-iteration Nsight capture
-  for CONCURRENCY in "${CONCURRENCIES[@]}"; do
-    NUM_PROMPTS=$((CONCURRENCY * CC_MULT))
+  for CONCURRENCY in "${M_CONCURRENCIES[@]}"; do
+    NUM_PROMPTS=$((CONCURRENCY * M_CC_MULT))
     STATUS="success"
     START_TS=$(date +%s)
     NSYS_FILE=""
@@ -215,8 +243,8 @@ EOF
       --base-url "http://localhost:$PORT" \
       --model "$MODEL" \
       --dataset-name random \
-      --random-input-len "$INPUT_LEN" \
-      --random-output-len "$OUTPUT_LEN" \
+      --random-input-len "$M_INPUT_LEN" \
+      --random-output-len "$M_OUTPUT_LEN" \
       --max-concurrency "$CONCURRENCY" \
       --num-prompts "$NUM_PROMPTS" \
       --seed "$(date +%s)" \
