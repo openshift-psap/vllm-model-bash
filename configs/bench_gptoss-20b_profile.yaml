@@ -95,7 +95,7 @@ models:
       output_len: 200
       result_prefix: "profile_gptoss_20b_default"
     profiling:
-      nsys_launch_args: "--trace=cuda,nvtx,osrt"
+      nsys_launch_args: "--trace=cuda,nvtx,osrt --cuda-graph-trace=node"
       nsys_start_args: "--force-overwrite=true --gpu-metrics-devices=cuda-visible "
 
 
@@ -110,7 +110,7 @@ models:
       output_len: 200
       result_prefix: "profile_gptoss_20b_default_asyncscheduling"
     profiling:
-      nsys_launch_args: "--trace=cuda,nvtx,osrt"
+      nsys_launch_args: "--trace=cuda,nvtx,osrt --cuda-graph-trace=node"
       nsys_start_args: "--force-overwrite=true --gpu-metrics-devices=cuda-visible "
 
   - name: openai/gpt-oss-20b
@@ -137,7 +137,7 @@ models:
       output_len: 200
       result_prefix: "profile_gptoss_20b_asyncschedule_decodeonly"
     profiling:
-      nsys_launch_args: "--trace=cuda,nvtx,osrt"
+      nsys_launch_args: "--trace=cuda,nvtx,osrt  --cuda-graph-trace=node"
       nsys_start_args: "--force-overwrite=true --gpu-metrics-devices=cuda-visible "
 
 
@@ -165,5 +165,5 @@ models:
       output_len: 200
       result_prefix: "profile_gptoss_20b_noasyncschedule_decodeonly"
     profiling:
-      nsys_launch_args: "--trace=cuda,nvtx,osrt"
+      nsys_launch_args: "--trace=cuda,nvtx,osrt  --cuda-graph-trace=node"
       nsys_start_args: "--force-overwrite=true --gpu-metrics-devices=cuda-visible "
