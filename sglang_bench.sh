@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 ###############################################################################
-# vllm_bench.sh
+# sglang_bench.sh
 # vLLM benchmark orchestrator:
 #  - Global + per-model env vars
 #  - Global + per-model configs (parallel/scheduler/eplb)
@@ -11,7 +11,7 @@
 ###############################################################################
 set -euo pipefail
 
-CONFIG_FILE=${1:? "Usage: vllm_bench.sh <config.yaml>"}
+CONFIG_FILE=${1:? "Usage: sglang_bench.sh <config.yaml>"}
 
 ###############################################################################
 # 1) Dependencies
@@ -26,11 +26,11 @@ if ! command -v yq &>/dev/null; then
   pip install --quiet yq || { echo "❌ Failed to install yq"; exit 1; }
 fi
 ###############################################################################
-# 2) Generate vllm congig yamls 
+# 2) Generate sglang congig yamls 
 ###############################################################################
-# In vllm_bench.sh (setup section)
+# In sglang_bench.sh (setup section)
 if [[ "${GENERATE_CONFIG_TEMPLATES:-false}" == "true" ]]; then
-  ./generate_vllm_config_templates.sh
+  ./generate_sglang_config_templates.sh
 fi
 
 
@@ -50,7 +50,7 @@ GLOBAL_PROFILE=$(python3 -m yq -r '.bench.profile // "false"' < "$CONFIG_FILE")
 GLOBAL_PARALLEL=$(python3 -m yq -r '.bench.configs.parallel // ""' < "$CONFIG_FILE")
 GLOBAL_SCHEDULER=$(python3 -m yq -r '.bench.configs.scheduler // ""' < "$CONFIG_FILE")
 GLOBAL_EPLB=$(python3 -m yq -r '.bench.configs.eplb // ""' < "$CONFIG_FILE")
-VLLM_BIN=$(python3 -m yq -r '.bench.vllm_bin // "vllm"' < "$CONFIG_FILE")
+MODEL_VLLM_BIN=$(python3 -m yq -r '.bench.vllm_bin // "vllm"' < "$CONFIG_FILE")
 
 ###############################################################################
 # 3) Study directory + run log + manifest
@@ -150,7 +150,7 @@ for ((i=0; i<NUM_MODELS; i++)); do
   mkdir -p "${MODEL_DIR}"/{logs,results,profiles}
 
   # File paths (per-model)
-  LOGFILE="${MODEL_DIR}/logs/vllm_server.log"
+  LOGFILE="${MODEL_DIR}/logs/sglang_server.log"
   RESULT_PATH="${MODEL_DIR}/results/${MODEL_RESULT_FILE}"
   PER_MODEL_SUMMARY="${MODEL_DIR}/summary_model.csv"
   # Per-model summary header
@@ -216,7 +216,7 @@ EOF
 
   # Launch vLLM (optionally under Nsight Systems "launch" mode)
   if [[ "$MODEL_PROFILE" == "true" || "$COLLECT_NSYS" == "true" ]]; then
-    NSYS_LAUNCH_FILE="${MODEL_DIR}/profiles/nsys_vllm_server"
+    NSYS_LAUNCH_FILE="${MODEL_DIR}/profiles/nsys_sglang_server"
     echo "▶️ nsys launch → ${NSYS_LAUNCH_FILE}.qdrep (attached; not recording yet)"
     nsys launch ${NSYS_LAUNCH_ARGS} \
       python3 -m sglang.launch_server \
@@ -228,8 +228,8 @@ EOF
       --model-path "$MODEL" --port "$PORT" "${PARAMS_ARR[@]}" >"$LOGFILE" 2>&1 &
   fi
 
-  VLLM_PID=$!
-  echo "PID=$VLLM_PID"
+  SGLANG_PID=$!
+  echo "PID=$SGLANG_PID"
 
   # Wait for server readiness
   echo "⏳ Waiting for sglang on port $PORT..."
@@ -287,8 +287,8 @@ EOF
   done
 
   echo "🛑 Stopping vLLM server for $MODEL (sig $MODEL_SIG)"
-  pkill -TERM -P ${VLLM_PID} 2>/dev/null || true
-  kill -TERM ${VLLM_PID} 2>/dev/null || true
+  pkill -TERM -P ${SGLANG_PID} 2>/dev/null || true
+  kill -TERM ${SGLANG_PID} 2>/dev/null || true
   sleep 3
 done
 
