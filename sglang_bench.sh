@@ -62,6 +62,9 @@ mkdir -p "$STUDY_DIR"
 STUDY_LOG="${STUDY_DIR}/run_output.log"
 SUMMARY_CSV="${STUDY_DIR}/summary.csv"
 
+#Copy the config file to STUDY directory
+cp ${CONFIG_FILE} ${STUDY_DIR}/run.yaml
+
 # Redirect all stdout/stderr to both console and study log
 exec > >(tee -a "$STUDY_LOG") 2>&1
 
