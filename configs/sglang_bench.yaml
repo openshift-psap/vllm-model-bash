@@ -1,0 +1,32 @@
+bench:
+  sglang_bin: python3 -m sglang.launch_server
+  vllm_bin:   /sgl-workspace/vllm/bin/vllm
+  concurrencies: [1, 32, 128,512, 650]
+  input_len: 512
+  output_len: 128
+  cc_mult: 10
+  result_prefix: results
+  collect_nsys: false
+  study_dir: Study_SGLang
+  env:
+    HF_HOME: /mnt/workspace
+    TORCH_CUDA_ARCH_LIST: "9.0"
+
+models:
+  - name: openai/gpt-oss-20b
+    port: 8000
+    params: "--trust-remote-code --context-length 8192 --kv-cache-dtype fp8_e5m2 --mem-fraction-static 0.95 --max-running-requests 512 "
+    bench: 
+      result_prefix: measure_sglang_gptoss_20b_kvcache_fp8e5m2
+
+  - name: openai/gpt-oss-20b
+    port: 8000
+    params: "--trust-remote-code --context-length 8192 --mem-fraction-static 0.95 --max-running-requests 512 "
+    bench: 
+      result_prefix: measure_sglang_gptoss_20b_no_kvcache_fp8
+
+  - name: openai/gpt-oss-120b
+    port: 8000
+    params: "--trust-remote-code --context-length 8192 --mem-fraction-static 0.95 --max-running-requests 512 "
+    bench: 
+      result_prefix: measure_sglang_gptoss_120b_no_kvcache_fp8
