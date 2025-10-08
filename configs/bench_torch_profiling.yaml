@@ -1,0 +1,74 @@
+bench:
+  # --- Global benchmark defaults ---
+  concurrencies: [1, 32, 128]
+  input_len: 512
+  output_len: 128
+  cc_mult: 5
+  result_prefix: results
+  collect_nsys: false
+  profile: false
+  study_dir: "Study_TorchProfiling"
+  env:
+    HF_HOME: "/mnt/models"
+    TORCH_CUDA_ARCH_LIST: "9.0"
+    CUDA_VISIBLE_DEVICES: "0"
+
+models:
+  # Example 1: Torch profiler only (no nsys)
+  - name: openai/gpt-oss-20b
+    port: 8000
+    params: "--max-model-len 4096 --max-num-seq 256 --gpu-memory-utilization 0.9 --disable-log-requests"
+    profile: false  # nsys disabled
+    bench:
+      concurrencies: [1, 32, 128]
+      result_prefix: "torch_profile_only"
+    profiling:
+      # Torch profiler configuration
+      torch_profiler:
+        enabled: true
+        record_shapes: true
+        profile_memory: true
+        with_stack: false
+        with_flops: false
+
+  # Example 2: Torch profiler + Nsys combined profiling
+  - name: openai/gpt-oss-20b
+    port: 8000
+    params: "--max-model-len 4096 --max-num-seq 256 --async-scheduling --gpu-memory-utilization 0.9 --disable-log-requests"
+    profile: true  # nsys enabled
+    bench:
+      concurrencies: [32]
+      result_prefix: "torch_and_nsys_profile"
+    profiling:
+      # Nsys configuration
+      nsys_launch_args: "--trace=cuda,nvtx,osrt --cuda-graph-trace=node"
+      nsys_start_args: "--force-overwrite=true --gpu-metrics-devices=cuda-visible"
+
+      # Torch profiler configuration
+      torch_profiler:
+        enabled: true
+        record_shapes: true
+        profile_memory: true
+        with_stack: true      # Include Python stack traces
+        with_flops: true      # Include FLOP estimates
+
+  # Example 3: Detailed torch profiling with memory analysis
+  - name: openai/gpt-oss-20b
+    port: 8000
+    params: "--max-model-len 4096 --max-num-seq 256 --gpu-memory-utilization 0.9 --disable-log-requests"
+    compilation_config: |
+      {
+        "cudagraph_mode": "FULL_DECODE_ONLY",
+        "cudagraph_capture_sizes": [1, 2, 4, 8, 16, 32, 64, 128, 256]
+      }
+    profile: false
+    bench:
+      concurrencies: [128]
+      result_prefix: "torch_profile_memory_detailed"
+    profiling:
+      torch_profiler:
+        enabled: true
+        record_shapes: true
+        profile_memory: true
+        with_stack: true
+        with_flops: false
