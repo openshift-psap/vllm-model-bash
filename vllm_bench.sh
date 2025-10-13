@@ -145,11 +145,22 @@ for ((i=0; i<NUM_MODELS; i++)); do
   NSYS_LAUNCH_ARGS=$(python3 -m yq -r ".models[$i].profiling.nsys_launch_args // \"\"" < "$CONFIG_FILE")
   NSYS_START_ARGS=$(python3 -m yq -r ".models[$i].profiling.nsys_start_args // \"\"" < "$CONFIG_FILE")
 
+  # Torch profiler config
+  TORCH_PROFILER_ENABLED=$(python3 -m yq -r ".models[$i].profiling.torch_profiler.enabled // \"false\"" < "$CONFIG_FILE")
+  TORCH_PROFILER_RECORD_SHAPES=$(python3 -m yq -r ".models[$i].profiling.torch_profiler.record_shapes // \"true\"" < "$CONFIG_FILE")
+  TORCH_PROFILER_PROFILE_MEMORY=$(python3 -m yq -r ".models[$i].profiling.torch_profiler.profile_memory // \"true\"" < "$CONFIG_FILE")
+  TORCH_PROFILER_WITH_STACK=$(python3 -m yq -r ".models[$i].profiling.torch_profiler.with_stack // \"false\"" < "$CONFIG_FILE")
+  TORCH_PROFILER_WITH_FLOPS=$(python3 -m yq -r ".models[$i].profiling.torch_profiler.with_flops // \"false\"" < "$CONFIG_FILE")
+
   # Build model signature (unique per config) and subdirectories
   SIG_SRC="${MODEL}|${PORT}|${PARAMS}|${MODEL_PARALLEL}|${MODEL_SCHEDULER}|${MODEL_EPLB}|${NSYS_LAUNCH_ARGS}|${NSYS_START_ARGS}"
   MODEL_SIG=$(echo -n "$SIG_SRC" | md5sum | cut -c1-8)
   MODEL_DIR="${STUDY_DIR}/model_${MODEL//\//_}_${MODEL_SIG}"
   mkdir -p "${MODEL_DIR}"/{logs,results,profiles}
+
+  # Torch profiler output directory
+  TORCH_PROFILER_DIR=$(python3 -m yq -r ".models[$i].profiling.torch_profiler.output_dir // \"${MODEL_DIR}/profiles/torch\"" < "$CONFIG_FILE")
+  mkdir -p "$TORCH_PROFILER_DIR"
 
   # File paths (per-model)
   LOGFILE="${MODEL_DIR}/logs/vllm_server.log"
@@ -209,12 +220,28 @@ for ((i=0; i<NUM_MODELS; i++)); do
     "eplb": ${MODEL_EPLB:+$(jq -Rs . <<< "$MODEL_EPLB")}
   },
   "profiling": {
-    "launch_args": ${NSYS_LAUNCH_ARGS:+$(jq -Rs . <<< "$NSYS_LAUNCH_ARGS")},
-    "start_args": ${NSYS_START_ARGS:+$(jq -Rs . <<< "$NSYS_START_ARGS")}
+    "nsys": {
+      "launch_args": ${NSYS_LAUNCH_ARGS:+$(jq -Rs . <<< "$NSYS_LAUNCH_ARGS")},
+      "start_args": ${NSYS_START_ARGS:+$(jq -Rs . <<< "$NSYS_START_ARGS")}
+    },
+    "torch_profiler": {
+      "enabled": ${TORCH_PROFILER_ENABLED},
+      "output_dir": "${TORCH_PROFILER_DIR}",
+    }
   },
   "timestamp": "$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
 }
 EOF
+
+  # Set torch profiler environment variables if enabled
+  if [[ "$TORCH_PROFILER_ENABLED" == "true" ]]; then
+    echo "🔥 Torch profiler enabled → ${TORCH_PROFILER_DIR}"
+    export VLLM_TORCH_PROFILER_DIR="$TORCH_PROFILER_DIR"
+    export VLLM_TORCH_PROFILER_RECORD_SHAPES="$TORCH_PROFILER_RECORD_SHAPES"
+    export VLLM_TORCH_PROFILER_PROFILE_MEMORY="$TORCH_PROFILER_PROFILE_MEMORY"
+    export VLLM_TORCH_PROFILER_WITH_STACK="$TORCH_PROFILER_WITH_STACK"
+    export VLLM_TORCH_PROFILER_WITH_FLOPS="$TORCH_PROFILER_WITH_FLOPS"
+  fi
 
   # Launch vLLM (optionally under Nsight Systems "launch" mode)
   if [[ "$MODEL_PROFILE" == "true" || "$COLLECT_NSYS" == "true" ]]; then
@@ -246,6 +273,7 @@ EOF
     STATUS="success"
     START_TS=$(date +%s)
     NSYS_FILE=""
+    TORCH_PROFILE_FILE=""
 
     echo ""
     echo "===== $MODEL (sig $MODEL_SIG): $NUM_PROMPTS prompts @ conc $CONCURRENCY ====="
@@ -256,26 +284,54 @@ EOF
       nsys start ${NSYS_START_ARGS} --output "$NSYS_FILE"
     fi
 
-    if ! vllm bench serve \
-      --base-url "http://localhost:$PORT" \
-      --model "$MODEL" \
+    if [[ "$TORCH_PROFILER_ENABLED" == "true" ]]; then
+      TORCH_PROFILE_FILE="${TORCH_PROFILER_DIR}/trace_conc${CONCURRENCY}"
+      echo "🔥 Torch profiler will save to: ${TORCH_PROFILE_FILE}*"
+      # Update the output path for this specific concurrency run
+      export VLLM_TORCH_PROFILER_DIR="$TORCH_PROFILER_DIR"
+      export VLLM_TORCH_PROFILER_PREFIX="trace_conc${CONCURRENCY}"
+    fi
+
+    # Build vllm bench serve command with --profile flag if torch profiler is enabled
+    VLLM_BENCH_CMD="vllm bench serve \
+      --base-url http://localhost:$PORT \
+      --model $MODEL \
       --dataset-name random \
-      --random-input-len "$M_INPUT_LEN" \
-      --random-output-len "$M_OUTPUT_LEN" \
-      --max-concurrency "$CONCURRENCY" \
-      --num-prompts "$NUM_PROMPTS" \
-      --seed "$(date +%s)" \
+      --random-input-len $M_INPUT_LEN \
+      --random-output-len $M_OUTPUT_LEN \
+      --max-concurrency $CONCURRENCY \
+      --num-prompts $NUM_PROMPTS \
+      --seed $(date +%s) \
       --save-result \
-      --result-filename "$RESULT_PATH" \
-      --append-result \
-      $MODEL_VLLM_BENCH_OPTS; then
-        STATUS="failed"
+      --result-filename $RESULT_PATH \
+      --append-result"
+
+    # Add --profile flag if torch profiler is enabled
+    if [[ "$TORCH_PROFILER_ENABLED" == "true" ]]; then
+      VLLM_BENCH_CMD="$VLLM_BENCH_CMD --profile"
+    fi
+
+    # Add any additional user-specified options
+    if [[ -n "$MODEL_VLLM_BENCH_OPTS" ]]; then
+      VLLM_BENCH_CMD="$VLLM_BENCH_CMD $MODEL_VLLM_BENCH_OPTS"
+    fi
+
+    if ! eval "$VLLM_BENCH_CMD"; then
+      STATUS="failed"
     fi
 
     if [[ "$MODEL_PROFILE" == "true" || "$COLLECT_NSYS" == "true" ]]; then
       echo "🛑 nsys stop"
       nsys stop
       echo "✅ Nsight report saved: ${NSYS_FILE}.qdrep"
+    fi
+
+    if [[ "$TORCH_PROFILER_ENABLED" == "true" ]]; then
+      echo "✅ Torch profiler traces saved to: ${TORCH_PROFILER_DIR}/"
+      # List generated files if they exist
+      if ls "${TORCH_PROFILER_DIR}"/trace_conc${CONCURRENCY}* >/dev/null 2>&1; then
+        ls -lh "${TORCH_PROFILER_DIR}"/trace_conc${CONCURRENCY}* | sed 's/^/    /'
+      fi
     fi
 
     END_TS=$(date +%s)
