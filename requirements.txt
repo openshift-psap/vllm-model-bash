@@ -1,0 +1,8 @@
+# Core dependencies for vllm_bench.py
+PyYAML>=6.0
+requests>=2.31.0
+
+# Required for bash scripts (vllm_bench.sh)
+yq>=3.2.0
+
+# vLLM and benchmarking (install separately if needed)

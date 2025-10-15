@@ -1,0 +1,94 @@
+# Per-model configuration with scenarios
+model:
+  name: openai/gpt-oss-20b
+  base_params: "--max-model-len 8192 --gpu-memory-utilization 0.95 --disable-log-requests"
+
+# Global defaults for all scenarios in this model
+defaults:
+  bench:
+    concurrencies: [1, 32, 128, 512, 650]
+    input_len: 2000
+    output_len: 200
+    cc_mult: 10
+    result_prefix: results
+  env:
+    HF_HOME: "/mnt/models"
+    TORCH_CUDA_ARCH_LIST: "9.0"
+    CUDA_VISIBLE_DEVICES: "0"
+  study_dir: "Study_GPTOSS_20B"
+
+scenarios:
+  # Scenario 1: Baseline (no special flags)
+  - name: baseline
+    port: 8000
+    params: "--max-num-seq 512"
+    bench:
+      result_prefix: "measure_baseline"
+
+  # Scenario 2: Async scheduling
+  - name: async_scheduling
+    port: 8000
+    params: "--max-num-seq 512 --async-scheduling"
+    bench:
+      result_prefix: "measure_async_scheduling"
+
+  # Scenario 3: CUDA graph decode only without async scheduling
+  - name: cudagraph_decode_only
+    port: 8000
+    params: "--max-num-seq 512"
+    compilation_config: |
+      {
+        "cudagraph_mode": "FULL_DECODE_ONLY",
+        "cudagraph_capture_sizes": [
+          1,2,4,8,16,24,32,40,48,56,64,72,80,88,96,104,
+          112,120,128,136,144,152,160,168,176,184,192,200,
+          208,216,224,232,240,248,256,264,272,280,288,296,
+          304,312,320,328,336,344,352,360,368,376,384,392,
+          400,408,416,424,432,440,448,456,464,472,480,488,
+          496,504,512
+        ]
+      }
+    bench:
+      result_prefix: "measure_cudagraph_decode_only"
+
+  # Scenario 4: Async scheduling + CUDA graph decode only
+  - name: async_cudagraph_decode_only
+    port: 8000
+    params: "--max-num-seq 512 --async-scheduling"
+    compilation_config: |
+      {
+        "cudagraph_mode": "FULL_DECODE_ONLY",
+        "cudagraph_capture_sizes": [
+          1,2,4,8,16,24,32,40,48,56,64,72,80,88,96,104,
+          112,120,128,136,144,152,160,168,176,184,192,200,
+          208,216,224,232,240,248,256,264,272,280,288,296,
+          304,312,320,328,336,344,352,360,368,376,384,392,
+          400,408,416,424,432,440,448,456,464,472,480,488,
+          496,504,512
+        ]
+      }
+    bench:
+      result_prefix: "measure_async_cudagraph_decode_only"
+
+  # Scenario 5: Profiling with torch profiler + nsys
+  - name: profile_with_torch
+    port: 8000
+    params: "--max-num-seq 512 --async-scheduling"
+    profile: true
+    compilation_config: |
+      {
+        "cudagraph_mode": "FULL_DECODE_ONLY",
+        "cudagraph_capture_sizes": [1,2,4,8,16,32,64,128,256,512]
+      }
+    bench:
+      concurrencies: [32, 128]  # Override for profiling
+      result_prefix: "profile_async_cudagraph"
+    profiling:
+      nsys_launch_args: "--trace=cuda,nvtx,osrt --start-later=true --cuda-graph-trace=node"
+      nsys_start_args: "--force-overwrite=true --gpu-metrics-devices=cuda-visible"
+      torch_profiler:
+        enabled: true
+        record_shapes: true
+        profile_memory: true
+        with_stack: false
+        with_flops: false
