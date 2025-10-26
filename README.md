@@ -1,23 +1,7 @@
 # vllm-model-bash
 Scripts for vllm-model-bash efforts 
 
-## Usage
-```bash
-bash vllm_bench.sh config.yaml
-```
-### Example configs/test.yaml
-
-# 🚀 vLLM Benchmark Harness (`vllm_bench.sh`)
-
-This harness automates:
-- Launching and monitoring `vllm serve` for multiple models
-- Running `vllm bench serve` benchmarks with per-model overrides
-- Collecting Nsight Systems (`nsys`) profiling traces
-- Generating structured results and per-model summaries
-
----
-
-## 🧠 Overview
+## Overview
 
 Each benchmark run:
 1. Launches a vLLM server based on the YAML config
@@ -28,6 +12,31 @@ Each benchmark run:
 Ideal for performance characterization, MLPerf inference testing, and multi-level GPU profiling at scale.
 
 ---
+
+### Installation
+
+```bash
+pip install -r requirements.txt
+```
+
+### Basic Usage
+
+**Python script** (recommended for scenario-based configs):
+```bash
+# Run all scenarios
+python vllm_bench.py configs/models/gpt-oss-20b.yaml
+
+# Run specific scenario(s)
+python vllm_bench.py configs/models/gpt-oss-20b.yaml --scenario baseline
+python vllm_bench.py configs/models/gpt-oss-20b.yaml --scenarios baseline,async_scheduling
+```
+
+**Bash script** (legacy support):
+```bash
+# Works with both old and new config formats
+bash vllm_bench.sh config.yaml
+bash vllm_bench.sh configs/models/gpt-oss-20b.yaml --scenario baseline
+```
 
 ## ⚙️ Requirements
 
@@ -48,51 +57,3 @@ For GPU profiling capabilities:
 - **PyTorch Profiler**: Python/PyTorch-level CPU and GPU profiling with memory tracking
 
 ---
-
-## 🔥 Profiling Options
-
-### 1. Nsight Systems (nsys)
-
-Captures system-wide GPU activity, CUDA graphs, and NVTX ranges.
-
-```yaml
-profiling:
-  nsys_launch_args: "--trace=cuda,nvtx,osrt --cuda-graph-trace=node"
-  nsys_start_args: "--force-overwrite=true --gpu-metrics-devices=cuda-visible"
-```
-
-**Outputs**: `.qdrep` files viewable in Nsight Systems GUI
-
-### 2. PyTorch Profiler
-
-Captures Python-level CPU/GPU activity, memory allocations, and operator traces.
-
-```yaml
-profiling:
-  torch_profiler:
-    enabled: true
-    record_shapes: true        # Record tensor shapes
-    profile_memory: true       # Track memory allocations
-    with_stack: false          # Include Python stack traces
-    with_flops: false          # Include FLOP estimates
-```
-
-**Outputs**:
-- Chrome trace files (`.json`) - viewable in `chrome://tracing`
-- PyTorch `.pt` trace files - loadable with `torch.profiler.load()`
-
-### 3. Combined Profiling
-
-You can enable both nsys and torch profiler simultaneously:
-
-```yaml
-profile: true  # Enables nsys
-profiling:
-  nsys_launch_args: "--trace=cuda,nvtx,osrt --cuda-graph-trace=node"
-  nsys_start_args: "--force-overwrite=true --gpu-metrics-devices=cuda-visible"
-
-  torch_profiler:
-    enabled: true
-    record_shapes: true
-    profile_memory: true
-```
