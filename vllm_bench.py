@@ -11,6 +11,7 @@ import shutil
 import signal
 import subprocess
 import sys
+import threading
 import time
 from datetime import datetime
 from pathlib import Path
@@ -21,9 +22,12 @@ import yaml
 
 
 class VLLMBenchmark:
-    def __init__(self, config_path: str, scenario_filter: Optional[List[str]] = None):
+    def __init__(self, config_path: str, scenario_filter: Optional[List[str]] = None,
+                 nsys_delay: Optional[float] = None, nsys_duration: Optional[float] = None):
         self.config_path = Path(config_path)
         self.scenario_filter = scenario_filter
+        self.nsys_delay = nsys_delay
+        self.nsys_duration = nsys_duration
         self.config = self._load_config()
         self.study_dir = self._setup_study_dir()
         self.summary_data = []
@@ -327,39 +331,92 @@ class VLLMBenchmark:
             if torch_enabled:
                 os.environ['VLLM_TORCH_PROFILER_PREFIX'] = f"trace_conc{concurrency}"
 
-            # Start nsys profiling
+            # Setup nsys profiling (start in background if delay is specified)
             nsys_file = None
+            nsys_stop_timer = None
+            nsys_started_event = None
             if profile_nsys:
                 nsys_file = scenario_dir / 'profiles' / f"nsys_conc{concurrency}"
                 nsys_start_args = scenario.get('profiling', {}).get('nsys_start_args', '--force-overwrite=true')
 
-                if nsys_session_id:
-                    # Session-based profiling
-                    print(f"🎥 nsys start --session={nsys_session_id} → {nsys_file}.qdrep")
-                    cmd = ['nsys', 'start', f'--session={nsys_session_id}']
-                    cmd += nsys_start_args.split() + ['--output', str(nsys_file)]
-                    subprocess.run(cmd)
-                else:
-                    # Legacy mode (no session)
-                    print(f"🎥 nsys start → {nsys_file}.qdrep")
-                    subprocess.run(['nsys', 'start'] + nsys_start_args.split() + ['--output', str(nsys_file)])
+                def start_nsys_profiling():
+                    """Start nsys profiling and optional duration timer."""
+                    if nsys_session_id:
+                        # Session-based profiling
+                        print(f"🎥 nsys start --session={nsys_session_id} → {nsys_file}.qdrep")
+                        cmd = ['nsys', 'start', f'--session={nsys_session_id}']
+                        cmd += nsys_start_args.split() + ['--output', str(nsys_file)]
+                        subprocess.run(cmd)
+                    else:
+                        # Legacy mode (no session)
+                        print(f"🎥 nsys start → {nsys_file}.qdrep")
+                        subprocess.run(['nsys', 'start'] + nsys_start_args.split() + ['--output', str(nsys_file)])
 
-            # Run benchmark
+                    # Mark that nsys has started
+                    if nsys_started_event:
+                        nsys_started_event.set()
+
+                    # If duration is specified, start a timer to auto-stop nsys
+                    if self.nsys_duration:
+                        print(f"⏱️  Nsys will auto-stop after {self.nsys_duration} seconds from now")
+
+                        def stop_nsys_after_duration():
+                            if nsys_session_id:
+                                print(f"\n⏰ Duration expired - stopping nsys (session={nsys_session_id})")
+                                subprocess.run(['nsys', 'stop', f'--session={nsys_session_id}'])
+                            else:
+                                print("\n⏰ Duration expired - stopping nsys")
+                                subprocess.run(['nsys', 'stop'])
+                            print(f"✅ Saved: {nsys_file}.qdrep")
+
+                        timer = threading.Timer(self.nsys_duration, stop_nsys_after_duration)
+                        timer.start()
+
+                if self.nsys_delay:
+                    # Start nsys in background after delay, benchmark continues immediately
+                    print(f"⏱️  Nsys will start after {self.nsys_delay} seconds (benchmark starts now)")
+                    nsys_started_event = threading.Event()
+
+                    def delayed_nsys_start():
+                        time.sleep(self.nsys_delay)
+                        start_nsys_profiling()
+
+                    nsys_thread = threading.Thread(target=delayed_nsys_start, daemon=True)
+                    nsys_thread.start()
+                else:
+                    # Start nsys immediately (original behavior)
+                    start_nsys_profiling()
+
+            # Run benchmark (starts immediately, concurrent with delayed nsys start if applicable)
             status, runtime = self._run_benchmark(
                 scenario_name, port, concurrency, num_prompts,
                 input_len, output_len, result_file,
                 enable_profiling=torch_enabled
             )
 
-            # Stop nsys profiling
+            # Stop nsys profiling (only if duration was not specified)
             if profile_nsys:
-                if nsys_session_id:
-                    print(f"🛑 nsys stop --session={nsys_session_id}")
-                    subprocess.run(['nsys', 'stop', f'--session={nsys_session_id}'])
+                if self.nsys_duration:
+                    # Duration-based stop is handled by timer
+                    # Wait for nsys to start if it hasn't yet
+                    if nsys_started_event and not nsys_started_event.is_set():
+                        print(f"⏱️  Waiting for delayed nsys to start before duration timer kicks in...")
+                        nsys_started_event.wait()
+                    print(f"⏱️  Benchmark completed. Nsys will be stopped by duration timer.")
                 else:
-                    print("🛑 nsys stop")
-                    subprocess.run(['nsys', 'stop'])
-                print(f"✅ Saved: {nsys_file}.qdrep")
+                    # Manual stop after benchmark completion (original behavior)
+                    # Wait for nsys to start if delay was specified
+                    if nsys_started_event and not nsys_started_event.is_set():
+                        print(f"⏱️  Waiting for delayed nsys to start before stopping...")
+                        nsys_started_event.wait()
+
+                    if nsys_session_id:
+                        print(f"🛑 nsys stop --session={nsys_session_id}")
+                        subprocess.run(['nsys', 'stop', f'--session={nsys_session_id}'])
+                    else:
+                        print("🛑 nsys stop")
+                        subprocess.run(['nsys', 'stop'])
+                    print(f"✅ Saved: {nsys_file}.qdrep")
 
             # Report torch profiler output
             if torch_dir:
@@ -438,6 +495,16 @@ def main():
         dest='scenarios',
         help='Comma-separated list of scenarios to run'
     )
+    parser.add_argument(
+        '--delay',
+        type=float,
+        help='Delay (in seconds) before starting nsys profiling session'
+    )
+    parser.add_argument(
+        '--duration',
+        type=float,
+        help='Duration (in seconds) for nsys profiling. If specified, nsys will stop after this duration instead of at benchmark completion'
+    )
 
     args = parser.parse_args()
 
@@ -446,7 +513,12 @@ def main():
         scenario_filter = [s.strip() for s in args.scenarios.split(',')]
 
     try:
-        benchmark = VLLMBenchmark(args.config, scenario_filter)
+        benchmark = VLLMBenchmark(
+            args.config,
+            scenario_filter,
+            nsys_delay=args.delay,
+            nsys_duration=args.duration
+        )
         benchmark.run()
     except Exception as e:
         print(f"❌ Fatal error: {e}", file=sys.stderr)
