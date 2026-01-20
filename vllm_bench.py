@@ -4,7 +4,9 @@ vllm_bench.py - Scenario-based vLLM benchmarking tool
 """
 
 import argparse
+import copy
 import csv
+import itertools
 import json
 import os
 import shutil
@@ -202,19 +204,45 @@ class VLLMBenchmark:
 
         time.sleep(2)
 
-    def _run_benchmark(
+    def _substitute_variables(self, template: str, context: Dict[str, Any]) -> str:
+        """Substitute variables in template string using {variable} syntax."""
+        try:
+            return template.format(**context)
+        except KeyError as e:
+            raise ValueError(f"Missing variable in template: {e}")
+
+    def _build_benchmark_command(
         self,
-        scenario_name: str,
-        port: int,
-        concurrency: int,
-        num_prompts: int,
-        input_len: int,
-        output_len: int,
-        result_file: Path,
-        enable_profiling: bool = False
-    ) -> tuple[str, int]:
-        """Run vLLM benchmark."""
-        model_name = self.config['model']['name']
+        bench_config: Dict[str, Any],
+        context: Dict[str, Any]
+    ) -> List[str]:
+        """Build benchmark command from config with variable substitution."""
+        # Check if new command-based config exists
+        if 'command' in bench_config:
+            cmd_config = bench_config['command']
+            executable = cmd_config.get('executable', 'vllm')
+            
+            # Substitute variables in executable path
+            executable = self._substitute_variables(executable, context)
+            
+            # Build args list with variable substitution
+            args = []
+            for arg in cmd_config.get('args', []):
+                # Substitute variables in each argument
+                substituted_arg = self._substitute_variables(str(arg), context)
+                args.append(substituted_arg)
+            
+            return [executable] + args
+        
+        # Legacy mode: build vllm bench command
+        model_name = context.get('model_name', self.config['model']['name'])
+        port = context.get('port', 8000)
+        concurrency = context.get('concurrency', 1)
+        num_prompts = context.get('num_prompts', 10)
+        input_len = context.get('input_len', 2000)
+        output_len = context.get('output_len', 200)
+        result_file = context.get('result_file', '')
+        enable_profiling = context.get('enable_profiling', False)
 
         cmd = [
             "vllm", "bench", "serve",
@@ -234,20 +262,140 @@ class VLLMBenchmark:
         if enable_profiling:
             cmd.append("--profile")
 
+        return cmd
+
+    def _run_benchmark(
+        self,
+        scenario_name: str,
+        port: int,
+        concurrency: int,
+        num_prompts: int,
+        input_len: int,
+        output_len: int,
+        result_file: Path,
+        bench_config: Dict[str, Any],
+        scenario_dir: Path,
+        enable_profiling: bool = False
+    ) -> tuple[str, int]:
+        """Run benchmark with configurable client."""
+        model_name = self.config['model']['name']
+        
+        # Build context for variable substitution
+        context = {
+            'port': port,
+            'model_name': model_name,
+            'concurrency': concurrency,
+            'num_prompts': num_prompts,
+            'input_len': input_len,
+            'output_len': output_len,
+            'seed': int(time.time()),
+            'result_file': str(result_file),
+            'result_dir': str(scenario_dir / 'results'),
+            'scenario_dir': str(scenario_dir),
+            'scenario_name': scenario_name,
+            'timestamp': int(time.time()),
+            'study_dir': str(self.study_dir),
+            'enable_profiling': enable_profiling,
+        }
+        
+        # Add any additional variables from bench_config
+        if 'variables' in bench_config:
+            for key, value in bench_config['variables'].items():
+                # Substitute nested variables
+                if isinstance(value, str) and '{' in value:
+                    value = self._substitute_variables(value, context)
+                context[key] = value
+
+        # Build command
+        cmd = self._build_benchmark_command(bench_config, context)
+        
+        # Set working directory if specified
+        work_dir = None
+        if 'work_dir' in bench_config:
+            work_dir_str = self._substitute_variables(bench_config['work_dir'], context)
+            work_dir = Path(work_dir_str)
+            work_dir.mkdir(parents=True, exist_ok=True)
+
+        # Set environment variables if specified
+        env = os.environ.copy()
+        if 'env' in bench_config:
+            for key, value in bench_config['env'].items():
+                env_value = self._substitute_variables(str(value), context)
+                env[key] = env_value
+
         print(f"===== Concurrency: {concurrency} ({num_prompts} prompts) =====")
+        print(f"🔧 Command: {' '.join(cmd[:8])}...")
 
         start_time = time.time()
         try:
-            subprocess.run(cmd, check=True, capture_output=False)
+            subprocess.run(
+                cmd,
+                check=True,
+                capture_output=False,
+                cwd=work_dir,
+                env=env,
+                timeout=bench_config.get('timeout', 3600)
+            )
             status = "success"
         except subprocess.CalledProcessError:
             status = "failed"
+        except subprocess.TimeoutExpired:
+            status = "timeout"
 
         runtime = int(time.time() - start_time)
         return status, runtime
 
+    def _generate_param_combinations(self, param_ranges: Dict[str, List[Any]]) -> List[Dict[str, Any]]:
+        """Generate all combinations of parameter values from ranges.
+        
+        Example:
+            param_ranges = {'max_num_seq': [256, 512], 'gpu_memory_util': [0.9, 0.95]}
+            Returns: [
+                {'max_num_seq': 256, 'gpu_memory_util': 0.9},
+                {'max_num_seq': 256, 'gpu_memory_util': 0.95},
+                {'max_num_seq': 512, 'gpu_memory_util': 0.9},
+                {'max_num_seq': 512, 'gpu_memory_util': 0.95}
+            ]
+        """
+        if not param_ranges:
+            return [{}]
+        
+        import itertools
+        
+        keys = list(param_ranges.keys())
+        values = [param_ranges[key] for key in keys]
+        
+        combinations = []
+        for combo in itertools.product(*values):
+            combinations.append(dict(zip(keys, combo)))
+        
+        return combinations
+
+    def _apply_param_to_args(self, base_params: List[str], param_name: str, param_value: Any) -> List[str]:
+        """Apply a parameter value to the params list, replacing or adding the argument.
+        
+        Converts param_name like 'max_num_seq' to '--max-num-seq'.
+        """
+        arg_name = f"--{param_name.replace('_', '-')}"
+        
+        # Remove existing argument if present
+        new_params = []
+        i = 0
+        while i < len(base_params):
+            if base_params[i] == arg_name:
+                # Skip the argument and its value
+                i += 2
+                continue
+            new_params.append(base_params[i])
+            i += 1
+        
+        # Add new argument
+        new_params.extend([arg_name, str(param_value)])
+        
+        return new_params
+
     def _run_scenario(self, scenario: Dict):
-        """Run a single scenario."""
+        """Run a single scenario, optionally with parameter ranges."""
         scenario_name = scenario['name']
         print("\n" + "=" * 50)
         print(f"📋 Scenario: {scenario_name}")
@@ -260,184 +408,296 @@ class VLLMBenchmark:
         (scenario_dir / 'results').mkdir(exist_ok=True)
         (scenario_dir / 'profiles').mkdir(exist_ok=True)
 
-        log_file = scenario_dir / 'logs' / 'vllm_server.log'
-
-        # Merge parameters
-        base_params = self.config['model'].get('base_params', '')
-        scenario_params = scenario.get('params', '')
-        full_params = f"{base_params} {scenario_params}".strip().split()
-
-        # Handle compilation config
-        if 'compilation_config' in scenario:
-            comp_config = scenario['compilation_config']
-            if isinstance(comp_config, str):
-                comp_config = yaml.safe_load(comp_config)
-            full_params.extend(['--compilation-config', json.dumps(comp_config)])
-
-        port = scenario.get('port', 8000)
-        print(f"🌐 Port: {port}")
-        print(f"⚙️  Params: {' '.join(full_params[:3])}...")
-
         # Get benchmark settings
         defaults = self.config.get('defaults', {})
         bench_defaults = defaults.get('bench', {})
         bench_config = {**bench_defaults, **scenario.get('bench', {})}
 
-        concurrencies = bench_config.get('concurrencies', [1, 32, 128])
+        # Get iteration settings - support datasets/scenarios for MLPerf or concurrencies for vllm bench
+        datasets = bench_config.get('datasets', None)
+        scenarios_list = bench_config.get('scenarios', None)  # Renamed to avoid conflict with scenario dict
+        concurrencies = bench_config.get('concurrencies', None)
+        
         input_len = bench_config.get('input_len', 2000)
         output_len = bench_config.get('output_len', 200)
         cc_mult = bench_config.get('cc_mult', 10)
         result_prefix = bench_config.get('result_prefix', f"scenario_{scenario_name}")
 
-        result_file = scenario_dir / 'results' / f"{result_prefix}.json"
+        # Generate iteration combinations
+        # Priority: datasets/scenarios (MLPerf) > concurrencies (vllm bench)
+        if datasets is not None or scenarios_list is not None:
+            # MLPerf-style iteration over datasets and/or scenarios
+            # If only one is specified, use it alone; if both, use cartesian product
+            if datasets is not None and scenarios_list is not None:
+                # Both specified: cartesian product
+                iteration_items = []
+                for dataset, scenario_type in itertools.product(datasets, scenarios_list):
+                    iteration_items.append({'dataset': dataset, 'scenario': scenario_type})
+                print(f"📊 MLPerf iteration: {len(datasets)} dataset(s) × {len(scenarios_list)} scenario(s) = {len(iteration_items)} run(s)")
+            elif datasets is not None:
+                # Only datasets specified
+                iteration_items = [{'dataset': d} for d in datasets]
+                print(f"📊 MLPerf iteration: {len(datasets)} dataset(s)")
+            else:
+                # Only scenarios specified
+                iteration_items = [{'scenario': s} for s in scenarios_list]
+                print(f"📊 MLPerf iteration: {len(scenarios_list)} scenario(s)")
+        elif concurrencies is not None:
+            # vllm bench-style iteration over concurrencies
+            iteration_items = [{'concurrency': c} for c in concurrencies]
+            print(f"📊 Concurrency iteration: {len(concurrencies)} value(s)")
+        else:
+            # Default: single concurrency of 1
+            iteration_items = [{'concurrency': 1}]
+            print(f"📊 Default: single run with concurrency=1")
 
-        # Profiling settings
-        profile_nsys = scenario.get('profile', False)
-        nsys_launch_args = scenario.get('profiling', {}).get('nsys_launch_args', '')
-        torch_enabled = scenario.get('profiling', {}).get('torch_profiler', {}).get('enabled', False)
+        # Check for parameter ranges
+        param_ranges = scenario.get('param_ranges', {})
+        param_combinations = self._generate_param_combinations(param_ranges)
+        
+        if param_ranges:
+            print(f"🔄 Parameter ranges detected: {list(param_ranges.keys())}")
+            print(f"   Will run {len(param_combinations)} parameter combination(s)")
 
-        # Setup torch profiler environment BEFORE launching server
-        torch_dir = None
-        if torch_enabled:
-            torch_dir = scenario_dir / 'profiles' / 'torch'
-            torch_dir.mkdir(parents=True, exist_ok=True)
+        # Run scenario for each parameter combination
+        for param_idx, param_combo in enumerate(param_combinations):
+            if param_ranges:
+                combo_suffix = "_".join([f"{k}_{v}" for k, v in sorted(param_combo.items())])
+                combo_scenario_name = f"{scenario_name}_{combo_suffix}"
+                combo_result_prefix = f"{result_prefix}_{combo_suffix}"
+                print(f"\n{'='*50}")
+                print(f"📋 Parameter combination {param_idx + 1}/{len(param_combinations)}: {param_combo}")
+                print(f"{'='*50}")
+            else:
+                combo_scenario_name = scenario_name
+                combo_result_prefix = result_prefix
 
-            torch_config = scenario.get('profiling', {}).get('torch_profiler', {})
-            print(f"🔥 Torch profiler enabled → {torch_dir}")
+            log_file = scenario_dir / 'logs' / f'vllm_server_{combo_scenario_name}.log'
 
-            os.environ['VLLM_TORCH_PROFILER_DIR'] = str(torch_dir)
-            os.environ['VLLM_TORCH_PROFILER_RECORD_SHAPES'] = str(torch_config.get('record_shapes', True)).lower()
-            os.environ['VLLM_TORCH_PROFILER_PROFILE_MEMORY'] = str(torch_config.get('profile_memory', True)).lower()
-            os.environ['VLLM_TORCH_PROFILER_WITH_STACK'] = str(torch_config.get('with_stack', False)).lower()
-            os.environ['VLLM_TORCH_PROFILER_WITH_FLOPS'] = str(torch_config.get('with_flops', False)).lower()
+            # Merge parameters
+            base_params = self.config['model'].get('base_params', '')
+            scenario_params = scenario.get('params', '')
+            full_params = f"{base_params} {scenario_params}".strip().split()
 
-        # Start server
-        self.server_process, nsys_session_id = self._start_server(
-            scenario_name, port, full_params, log_file,
-            nsys_profile=profile_nsys, nsys_args=nsys_launch_args
-        )
+            # Apply parameter combination to params
+            for param_name, param_value in param_combo.items():
+                full_params = self._apply_param_to_args(full_params, param_name, param_value)
 
-        if not self.server_process or not self._wait_for_server(port):
-            print(f"❌ Failed to start server for scenario: {scenario_name}")
-            if self.server_process:
-                self._stop_server(self.server_process)
-            return
+            # Handle compilation config
+            if 'compilation_config' in scenario:
+                comp_config = scenario['compilation_config']
+                if isinstance(comp_config, str):
+                    comp_config = yaml.safe_load(comp_config)
+                full_params.extend(['--compilation-config', json.dumps(comp_config)])
 
-        # Run benchmarks for each concurrency
-        for concurrency in concurrencies:
-            num_prompts = concurrency * cc_mult
+            port = scenario.get('port', 8000)
+            print(f"🌐 Port: {port}")
+            print(f"⚙️  Params: {' '.join(full_params[:5])}...")
 
-            # Update torch profiler prefix for this concurrency
+            result_file = scenario_dir / 'results' / f"{combo_result_prefix}.json"
+
+            # Profiling settings
+            profile_nsys = scenario.get('profile', False)
+            nsys_launch_args = scenario.get('profiling', {}).get('nsys_launch_args', '')
+            torch_enabled = scenario.get('profiling', {}).get('torch_profiler', {}).get('enabled', False)
+
+            # Setup torch profiler environment BEFORE launching server
+            torch_dir = None
             if torch_enabled:
-                os.environ['VLLM_TORCH_PROFILER_PREFIX'] = f"trace_conc{concurrency}"
+                torch_dir = scenario_dir / 'profiles' / 'torch'
+                torch_dir.mkdir(parents=True, exist_ok=True)
 
-            # Setup nsys profiling (start in background if delay is specified)
-            nsys_file = None
-            nsys_stop_timer = None
-            nsys_started_event = None
-            if profile_nsys:
-                nsys_file = scenario_dir / 'profiles' / f"nsys_conc{concurrency}"
-                nsys_start_args = scenario.get('profiling', {}).get('nsys_start_args', '--force-overwrite=true')
+                torch_config = scenario.get('profiling', {}).get('torch_profiler', {})
+                print(f"🔥 Torch profiler enabled → {torch_dir}")
 
-                def start_nsys_profiling():
-                    """Start nsys profiling and optional duration timer."""
-                    if nsys_session_id:
-                        # Session-based profiling
-                        print(f"🎥 nsys start --session={nsys_session_id} → {nsys_file}.qdrep")
-                        cmd = ['nsys', 'start', f'--session={nsys_session_id}']
-                        cmd += nsys_start_args.split() + ['--output', str(nsys_file)]
-                        subprocess.run(cmd)
-                    else:
-                        # Legacy mode (no session)
-                        print(f"🎥 nsys start → {nsys_file}.qdrep")
-                        subprocess.run(['nsys', 'start'] + nsys_start_args.split() + ['--output', str(nsys_file)])
+                os.environ['VLLM_TORCH_PROFILER_DIR'] = str(torch_dir)
+                os.environ['VLLM_TORCH_PROFILER_RECORD_SHAPES'] = str(torch_config.get('record_shapes', True)).lower()
+                os.environ['VLLM_TORCH_PROFILER_PROFILE_MEMORY'] = str(torch_config.get('profile_memory', True)).lower()
+                os.environ['VLLM_TORCH_PROFILER_WITH_STACK'] = str(torch_config.get('with_stack', False)).lower()
+                os.environ['VLLM_TORCH_PROFILER_WITH_FLOPS'] = str(torch_config.get('with_flops', False)).lower()
 
-                    # Mark that nsys has started
-                    if nsys_started_event:
-                        nsys_started_event.set()
-
-                    # If duration is specified, start a timer to auto-stop nsys
-                    if self.nsys_duration:
-                        print(f"⏱️  Nsys will auto-stop after {self.nsys_duration} seconds from now")
-
-                        def stop_nsys_after_duration():
-                            if nsys_session_id:
-                                print(f"\n⏰ Duration expired - stopping nsys (session={nsys_session_id})")
-                                subprocess.run(['nsys', 'stop', f'--session={nsys_session_id}'])
-                            else:
-                                print("\n⏰ Duration expired - stopping nsys")
-                                subprocess.run(['nsys', 'stop'])
-                            print(f"✅ Saved: {nsys_file}.qdrep")
-
-                        timer = threading.Timer(self.nsys_duration, stop_nsys_after_duration)
-                        timer.start()
-
-                if self.nsys_delay:
-                    # Start nsys in background after delay, benchmark continues immediately
-                    print(f"⏱️  Nsys will start after {self.nsys_delay} seconds (benchmark starts now)")
-                    nsys_started_event = threading.Event()
-
-                    def delayed_nsys_start():
-                        time.sleep(self.nsys_delay)
-                        start_nsys_profiling()
-
-                    nsys_thread = threading.Thread(target=delayed_nsys_start, daemon=True)
-                    nsys_thread.start()
-                else:
-                    # Start nsys immediately (original behavior)
-                    start_nsys_profiling()
-
-            # Run benchmark (starts immediately, concurrent with delayed nsys start if applicable)
-            status, runtime = self._run_benchmark(
-                scenario_name, port, concurrency, num_prompts,
-                input_len, output_len, result_file,
-                enable_profiling=torch_enabled
+            # Start server
+            self.server_process, nsys_session_id = self._start_server(
+                combo_scenario_name, port, full_params, log_file,
+                nsys_profile=profile_nsys, nsys_args=nsys_launch_args
             )
 
-            # Stop nsys profiling (only if duration was not specified)
-            if profile_nsys:
-                if self.nsys_duration:
-                    # Duration-based stop is handled by timer
-                    # Wait for nsys to start if it hasn't yet
-                    if nsys_started_event and not nsys_started_event.is_set():
-                        print(f"⏱️  Waiting for delayed nsys to start before duration timer kicks in...")
-                        nsys_started_event.wait()
-                    print(f"⏱️  Benchmark completed. Nsys will be stopped by duration timer.")
-                else:
-                    # Manual stop after benchmark completion (original behavior)
-                    # Wait for nsys to start if delay was specified
-                    if nsys_started_event and not nsys_started_event.is_set():
-                        print(f"⏱️  Waiting for delayed nsys to start before stopping...")
-                        nsys_started_event.wait()
+            if not self.server_process or not self._wait_for_server(port):
+                print(f"❌ Failed to start server for scenario: {combo_scenario_name}")
+                if self.server_process:
+                    self._stop_server(self.server_process)
+                continue  # Skip to next parameter combination
 
-                    if nsys_session_id:
-                        print(f"🛑 nsys stop --session={nsys_session_id}")
-                        subprocess.run(['nsys', 'stop', f'--session={nsys_session_id}'])
+            # Run benchmarks for each iteration item (dataset/scenario or concurrency)
+            for iter_idx, iter_item in enumerate(iteration_items):
+                # Extract iteration values
+                concurrency = iter_item.get('concurrency', None)
+                dataset = iter_item.get('dataset', None)
+                scenario_type = iter_item.get('scenario', None)
+                
+                # Calculate num_prompts if concurrency is available
+                num_prompts = concurrency * cc_mult if concurrency is not None else None
+                
+                # Build iteration suffix for file naming
+                iter_parts = []
+                if dataset is not None:
+                    iter_parts.append(f"dataset_{dataset}")
+                if scenario_type is not None:
+                    iter_parts.append(f"scenario_{scenario_type}")
+                if concurrency is not None:
+                    iter_parts.append(f"conc{concurrency}")
+                iter_suffix = "_".join(iter_parts) if iter_parts else f"iter{iter_idx}"
+                
+                # Update result file with iteration info
+                iter_result_file = scenario_dir / 'results' / f"{combo_result_prefix}_{iter_suffix}.json"
+
+                # Update torch profiler prefix
+                if torch_enabled:
+                    prefix_parts = []
+                    if concurrency is not None:
+                        prefix_parts.append(f"conc{concurrency}")
+                    if dataset is not None:
+                        prefix_parts.append(f"ds_{dataset}")
+                    if scenario_type is not None:
+                        prefix_parts.append(f"sc_{scenario_type}")
+                    prefix = "_".join(prefix_parts) if prefix_parts else f"iter{iter_idx}"
+                    os.environ['VLLM_TORCH_PROFILER_PREFIX'] = f"trace_{prefix}"
+
+                # Setup nsys profiling (start in background if delay is specified)
+                nsys_file = None
+                nsys_stop_timer = None
+                nsys_started_event = None
+                if profile_nsys:
+                    nsys_file = scenario_dir / 'profiles' / f"nsys_{combo_scenario_name}_{iter_suffix}"
+                    nsys_start_args = scenario.get('profiling', {}).get('nsys_start_args', '--force-overwrite=true')
+
+                    def start_nsys_profiling():
+                        """Start nsys profiling and optional duration timer."""
+                        if nsys_session_id:
+                            # Session-based profiling
+                            print(f"🎥 nsys start --session={nsys_session_id} → {nsys_file}.qdrep")
+                            cmd = ['nsys', 'start', f'--session={nsys_session_id}']
+                            cmd += nsys_start_args.split() + ['--output', str(nsys_file)]
+                            subprocess.run(cmd)
+                        else:
+                            # Legacy mode (no session)
+                            print(f"🎥 nsys start → {nsys_file}.qdrep")
+                            subprocess.run(['nsys', 'start'] + nsys_start_args.split() + ['--output', str(nsys_file)])
+
+                        # Mark that nsys has started
+                        if nsys_started_event:
+                            nsys_started_event.set()
+
+                        # If duration is specified, start a timer to auto-stop nsys
+                        if self.nsys_duration:
+                            print(f"⏱️  Nsys will auto-stop after {self.nsys_duration} seconds from now")
+
+                            def stop_nsys_after_duration():
+                                if nsys_session_id:
+                                    print(f"\n⏰ Duration expired - stopping nsys (session={nsys_session_id})")
+                                    subprocess.run(['nsys', 'stop', f'--session={nsys_session_id}'])
+                                else:
+                                    print("\n⏰ Duration expired - stopping nsys")
+                                    subprocess.run(['nsys', 'stop'])
+                                print(f"✅ Saved: {nsys_file}.qdrep")
+
+                            timer = threading.Timer(self.nsys_duration, stop_nsys_after_duration)
+                            timer.start()
+
+                    if self.nsys_delay:
+                        # Start nsys in background after delay, benchmark continues immediately
+                        print(f"⏱️  Nsys will start after {self.nsys_delay} seconds (benchmark starts now)")
+                        nsys_started_event = threading.Event()
+
+                        def delayed_nsys_start():
+                            time.sleep(self.nsys_delay)
+                            start_nsys_profiling()
+
+                        nsys_thread = threading.Thread(target=delayed_nsys_start, daemon=True)
+                        nsys_thread.start()
                     else:
-                        print("🛑 nsys stop")
-                        subprocess.run(['nsys', 'stop'])
-                    print(f"✅ Saved: {nsys_file}.qdrep")
+                        # Start nsys immediately (original behavior)
+                        start_nsys_profiling()
 
-            # Report torch profiler output
-            if torch_dir:
-                print(f"✅ Torch traces: {torch_dir}/")
-                trace_files = list(torch_dir.glob(f"trace_conc{concurrency}*"))
-                for f in trace_files:
-                    print(f"    {f.name} ({f.stat().st_size} bytes)")
+                # Update bench_config variables with iteration values
+                iter_bench_config = copy.deepcopy(bench_config)
+                if 'variables' not in iter_bench_config:
+                    iter_bench_config['variables'] = {}
+                # Merge iteration values into variables (don't overwrite existing)
+                if dataset is not None:
+                    iter_bench_config['variables']['dataset'] = dataset
+                    iter_bench_config['variables']['dataset_path'] = dataset  # Common alias
+                if scenario_type is not None:
+                    iter_bench_config['variables']['scenario'] = scenario_type
+                    iter_bench_config['variables']['scenario_type'] = scenario_type  # Common alias
+                if concurrency is not None:
+                    iter_bench_config['variables']['concurrency'] = concurrency
 
-            # Record summary
-            self.summary_data.append({
-                'scenario': scenario_name,
-                'port': port,
-                'concurrency': concurrency,
-                'num_prompts': num_prompts,
-                'status': status,
-                'runtime_sec': runtime,
-                'result_file': str(result_file)
-            })
+                # Run benchmark (starts immediately, concurrent with delayed nsys start if applicable)
+                status, runtime = self._run_benchmark(
+                    combo_scenario_name, port, concurrency, num_prompts,
+                    input_len, output_len, iter_result_file,
+                    iter_bench_config, scenario_dir,
+                    enable_profiling=torch_enabled
+                )
 
-        # Stop server
-        self._stop_server(self.server_process)
+                # Stop nsys profiling (only if duration was not specified)
+                if profile_nsys:
+                    if self.nsys_duration:
+                        # Duration-based stop is handled by timer
+                        # Wait for nsys to start if it hasn't yet
+                        if nsys_started_event and not nsys_started_event.is_set():
+                            print(f"⏱️  Waiting for delayed nsys to start before duration timer kicks in...")
+                            nsys_started_event.wait()
+                        print(f"⏱️  Benchmark completed. Nsys will be stopped by duration timer.")
+                    else:
+                        # Manual stop after benchmark completion (original behavior)
+                        # Wait for nsys to start if delay was specified
+                        if nsys_started_event and not nsys_started_event.is_set():
+                            print(f"⏱️  Waiting for delayed nsys to start before stopping...")
+                            nsys_started_event.wait()
+
+                        if nsys_session_id:
+                            print(f"🛑 nsys stop --session={nsys_session_id}")
+                            subprocess.run(['nsys', 'stop', f'--session={nsys_session_id}'])
+                        else:
+                            print("🛑 nsys stop")
+                            subprocess.run(['nsys', 'stop'])
+                        print(f"✅ Saved: {nsys_file}.qdrep")
+
+                # Report torch profiler output
+                if torch_dir:
+                    print(f"✅ Torch traces: {torch_dir}/")
+                    if concurrency is not None:
+                        trace_files = list(torch_dir.glob(f"trace_conc{concurrency}*"))
+                    else:
+                        trace_files = list(torch_dir.glob(f"trace_{iter_suffix}*"))
+                    for f in trace_files:
+                        print(f"    {f.name} ({f.stat().st_size} bytes)")
+
+                # Record summary
+                param_info = f"_{combo_suffix}" if param_ranges else ""
+                summary_row = {
+                    'scenario': f"{scenario_name}{param_info}",
+                    'port': port,
+                    'status': status,
+                    'runtime_sec': runtime,
+                    'result_file': str(iter_result_file),
+                    'params': str(param_combo) if param_combo else ""
+                }
+                # Add iteration-specific fields
+                if concurrency is not None:
+                    summary_row['concurrency'] = concurrency
+                    summary_row['num_prompts'] = num_prompts
+                if dataset is not None:
+                    summary_row['dataset'] = dataset
+                if scenario_type is not None:
+                    summary_row['mlperf_scenario'] = scenario_type
+                self.summary_data.append(summary_row)
+
+            # Stop server after all concurrencies for this parameter combination
+            self._stop_server(self.server_process)
+            time.sleep(2)  # Brief pause between parameter combinations
 
     def run(self):
         """Run all scenarios."""
@@ -451,11 +711,13 @@ class VLLMBenchmark:
 
         # Setup summary file
         summary_file = self.study_dir / 'summary.csv'
+        summary_fieldnames = [
+            'scenario', 'port', 'concurrency', 'num_prompts',
+            'dataset', 'mlperf_scenario',
+            'status', 'runtime_sec', 'result_file', 'params'
+        ]
         with open(summary_file, 'w', newline='') as f:
-            writer = csv.DictWriter(f, fieldnames=[
-                'scenario', 'port', 'concurrency', 'num_prompts',
-                'status', 'runtime_sec', 'result_file'
-            ])
+            writer = csv.DictWriter(f, fieldnames=summary_fieldnames)
             writer.writeheader()
 
         # Run each scenario
@@ -473,10 +735,17 @@ class VLLMBenchmark:
             raise
 
         # Write summary
-        with open(summary_file, 'w', newline='') as f:
-            writer = csv.DictWriter(f, fieldnames=self.summary_data[0].keys())
-            writer.writeheader()
-            writer.writerows(self.summary_data)
+        if self.summary_data:
+            with open(summary_file, 'w', newline='') as f:
+                # Use all keys from data, but ensure standard order
+                all_keys = set()
+                for row in self.summary_data:
+                    all_keys.update(row.keys())
+                fieldnames = [k for k in summary_fieldnames if k in all_keys]
+                fieldnames.extend([k for k in sorted(all_keys) if k not in fieldnames])
+                writer = csv.DictWriter(f, fieldnames=fieldnames)
+                writer.writeheader()
+                writer.writerows(self.summary_data)
 
         print("\n" + "=" * 50)
         print("🎉 All scenarios completed!")

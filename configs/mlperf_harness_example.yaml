@@ -1,0 +1,106 @@
+# MLPerf Harness Benchmark Configuration Example
+# Uses: python3 harness_main.py --server-config ... --server-target-qps 2 ...
+
+model:
+  name: openai/gpt-oss-120b
+  base_params: "--max-model-len 8192 --gpu-memory-utilization 0.95 --disable-log-requests"
+
+defaults:
+  bench:
+    # MLPerf harness command configuration
+    command:
+      executable: "python3"
+      args:
+        - "harness_main.py"
+        - "--server-config"
+        - "backendserver/gpt-oss-vllm.yaml"
+        - "--dataset-path"
+        - "{dataset}"
+        - "--model"
+        - "{model_name}"
+        - "--test-mode"
+        - "performance"
+        - "--output-dir"
+        - "{result_dir}"
+        - "--scenario"
+        - "{scenario}"
+        - "--lg-model-name"
+        - "gpt-oss-120b"
+        - "--server-target-qps"
+        - "{target_qps}"
+        - "--mlflow-experiment-name"
+        - "testing-stuff"
+        - "--mlflow-host"
+        - "150.239.115.202"
+        - "--mlflow-description"
+        - "Testing GPTOSS Serve"
+    
+    # Variables for substitution
+    variables:
+      target_qps: 2  # Can be overridden per scenario
+      result_dir: "{scenario_dir}/mlperf_results"
+    
+    # MLPerf iteration: datasets and scenarios (not concurrencies)
+    datasets:
+      - "v4/perf/perf_eval_ref.parquet"
+      - "v4/acc/acc_eval_ref.parquet"
+    scenarios:
+      - "Server"
+      - "Offline"
+    
+    # Environment variables for benchmark
+    env:
+      CUDA_VISIBLE_DEVICES: "0"
+    
+    # Working directory
+    work_dir: "/path/to/mlperf/inference"
+    
+    # Timeout in seconds
+    timeout: 7200
+
+  env:
+    HF_HOME: "/mnt/models"
+    CUDA_VISIBLE_DEVICES: "0"
+
+  study_dir: "Study_MLPerf_Harness"
+
+scenarios:
+  - name: mlperf_server_scenario
+    port: 8000
+    params: "--max-num-seq 512 --async-scheduling"
+    bench:
+      # Override datasets and scenarios per scenario
+      datasets:
+        - "v4/perf/perf_eval_ref.parquet"
+      scenarios:
+        - "Server"
+      variables:
+        target_qps: 2
+      
+      # Override command if needed
+      command:
+        executable: "python3"
+        args:
+          - "harness_main.py"
+          - "--server-config"
+          - "backendserver/gpt-oss-vllm.yaml"
+          - "--dataset-path"
+          - "{dataset}"
+          - "--model"
+          - "{model_name}"
+          - "--test-mode"
+          - "performance"
+          - "--output-dir"
+          - "{result_dir}"
+          - "--scenario"
+          - "{scenario}"
+          - "--lg-model-name"
+          - "gpt-oss-120b"
+          - "--server-target-qps"
+          - "{target_qps}"
+          - "--mlflow-experiment-name"
+          - "mlperf-benchmark"
+          - "--mlflow-host"
+          - "150.239.115.202"
+          - "--mlflow-description"
+          - "MLPerf Server Scenario Benchmark"

@@ -1,0 +1,59 @@
+# Example configuration showing parameter ranges feature
+# This will run the server with different parameter values
+
+model:
+  name: openai/gpt-oss-20b
+  base_params: "--max-model-len 8192 --gpu-memory-utilization 0.95 --disable-log-requests"
+
+defaults:
+  bench:
+    concurrencies: [1, 32, 128]
+    input_len: 2000
+    output_len: 200
+    cc_mult: 10
+    result_prefix: results
+  env:
+    HF_HOME: "/mnt/models"
+    CUDA_VISIBLE_DEVICES: "0"
+  study_dir: "Study_ParamRanges"
+
+scenarios:
+  # Scenario 1: Test different max-num-seq values
+  # This will run 3 separate server instances:
+  #   1. --max-num-seq 256
+  #   2. --max-num-seq 512
+  #   3. --max-num-seq 1024
+  - name: test_max_num_seq
+    port: 8000
+    params: "--async-scheduling"
+    param_ranges:
+      max_num_seq: [256, 512, 1024]
+    bench:
+      result_prefix: "max_num_seq_test"
+
+  # Scenario 2: Test different GPU memory utilization values
+  - name: test_gpu_memory
+    port: 8000
+    params: "--max-num-seq 512 --async-scheduling"
+    param_ranges:
+      gpu_memory_utilization: [0.85, 0.90, 0.95]
+    bench:
+      result_prefix: "gpu_memory_test"
+
+  # Scenario 3: Test multiple parameters (cartesian product)
+  # This will run 6 combinations:
+  #   max_num_seq=256, gpu_memory_utilization=0.85
+  #   max_num_seq=256, gpu_memory_utilization=0.90
+  #   max_num_seq=256, gpu_memory_utilization=0.95
+  #   max_num_seq=512, gpu_memory_utilization=0.85
+  #   max_num_seq=512, gpu_memory_utilization=0.90
+  #   max_num_seq=512, gpu_memory_utilization=0.95
+  - name: test_multiple_params
+    port: 8000
+    params: "--async-scheduling"
+    param_ranges:
+      max_num_seq: [256, 512]
+      gpu_memory_utilization: [0.85, 0.90, 0.95]
+    bench:
+      result_prefix: "multi_param_test"
+      concurrencies: [32, 128]  # Fewer concurrencies for faster testing

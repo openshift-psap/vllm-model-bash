@@ -1,0 +1,66 @@
+# MLPerf Run Benchmark Configuration Example
+# Uses: python run_mlperf.py --backend vllm --server-url http://localhost:8000 --scenario offline ...
+
+model:
+  name: openai/gpt-oss-120b
+  base_params: "--gpu-memory-utilization 0.90 --disable-log-requests"
+
+defaults:
+  bench:
+    # MLPerf run command configuration
+    command:
+      executable: "python"
+      args:
+        - "run_mlperf.py"
+        - "--backend"
+        - "vllm"
+        - "--server-url"
+        - "http://localhost:{port}"
+        - "--scenario"
+        - "{scenario}"
+        - "--input-file"
+        - "{dataset}"
+        - "--mlperf-conf"
+        - "mlperf_gptoss.conf"
+        - "--max-new-tokens"
+        - "{max_new_tokens}"
+    
+    # Variables for substitution
+    variables:
+      max_new_tokens: 10240
+    
+    # MLPerf iteration: datasets and scenarios
+    datasets:
+      - "perf_eval_ref.parquet"
+      - "acc_eval_ref.parquet"
+    scenarios:
+      - "offline"
+      - "Server"
+    
+    # Environment variables
+    env:
+      CUDA_VISIBLE_DEVICES: "4,5,6,7"
+    
+    # Working directory
+    work_dir: "/mnt/data/nmiriyal/TEST-MODEL-BASH/mlperf-inference-6.0-redhat/language/gpt-oss-120b"
+    
+    # Timeout in seconds
+    timeout: 7200
+
+  env:
+    HF_HOME: "/mnt/data/models"
+    CUDA_VISIBLE_DEVICES: "4,5,6,7"
+
+  study_dir: "Study_MLPerf_Run"
+
+scenarios:
+  - name: mlperf_offline
+    port: 8000
+    params: "-tp 4"
+    bench:
+      datasets:
+        - "perf_eval_ref.parquet"
+      scenarios:
+        - "offline"
+      variables:
+        max_new_tokens: 10240
