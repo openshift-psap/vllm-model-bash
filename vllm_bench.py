@@ -268,13 +268,14 @@ class VLLMBenchmark:
         self,
         scenario_name: str,
         port: int,
-        concurrency: int,
-        num_prompts: int,
+        concurrency: Optional[int],
+        num_prompts: Optional[int],
         input_len: int,
         output_len: int,
         result_file: Path,
         bench_config: Dict[str, Any],
         scenario_dir: Path,
+        log_file: Optional[Path] = None,
         enable_profiling: bool = False
     ) -> tuple[str, int]:
         """Run benchmark with configurable client."""
@@ -323,26 +324,73 @@ class VLLMBenchmark:
                 env_value = self._substitute_variables(str(value), context)
                 env[key] = env_value
 
-        print(f"===== Concurrency: {concurrency} ({num_prompts} prompts) =====")
+        # Create log file if not provided
+        if log_file is None:
+            logs_dir = scenario_dir / 'logs'
+            logs_dir.mkdir(parents=True, exist_ok=True)
+            if concurrency is not None:
+                log_file = logs_dir / f'benchmark_conc{concurrency}.log'
+            else:
+                log_file = logs_dir / f'benchmark_{int(time.time())}.log'
+        else:
+            # Ensure log directory exists
+            log_file.parent.mkdir(parents=True, exist_ok=True)
+
+        # Print status
+        if concurrency is not None and num_prompts is not None:
+            print(f"===== Concurrency: {concurrency} ({num_prompts} prompts) =====")
+        else:
+            print(f"===== Running benchmark =====")
         print(f"🔧 Command: {' '.join(cmd[:8])}...")
+        print(f"📝 Logging to: {log_file}")
 
         start_time = time.time()
         try:
-            subprocess.run(
-                cmd,
-                check=True,
-                capture_output=False,
-                cwd=work_dir,
-                env=env,
-                timeout=bench_config.get('timeout', 3600)
-            )
+            # Capture stdout and stderr to log file
+            with open(log_file, 'w') as log_f:
+                # Write command header
+                log_f.write(f"Command: {' '.join(cmd)}\n")
+                log_f.write(f"Working directory: {work_dir or os.getcwd()}\n")
+                log_f.write(f"Start time: {datetime.now().isoformat()}\n")
+                log_f.write("=" * 80 + "\n\n")
+                log_f.flush()
+                
+                # Run command and capture output
+                result = subprocess.run(
+                    cmd,
+                    check=True,
+                    stdout=log_f,
+                    stderr=subprocess.STDOUT,  # Merge stderr into stdout
+                    cwd=work_dir,
+                    env=env,
+                    timeout=bench_config.get('timeout', 3600)
+                )
+                
+                # Write footer
+                log_f.write("\n" + "=" * 80 + "\n")
+                log_f.write(f"End time: {datetime.now().isoformat()}\n")
+                log_f.write(f"Status: success\n")
+                log_f.write(f"Return code: {result.returncode}\n")
+            
             status = "success"
-        except subprocess.CalledProcessError:
+        except subprocess.CalledProcessError as e:
+            # Write error to log file
+            with open(log_file, 'a') as log_f:
+                log_f.write(f"\n{'=' * 80}\n")
+                log_f.write(f"End time: {datetime.now().isoformat()}\n")
+                log_f.write(f"Status: failed\n")
+                log_f.write(f"Return code: {e.returncode}\n")
             status = "failed"
         except subprocess.TimeoutExpired:
+            # Write timeout to log file
+            with open(log_file, 'a') as log_f:
+                log_f.write(f"\n{'=' * 80}\n")
+                log_f.write(f"End time: {datetime.now().isoformat()}\n")
+                log_f.write(f"Status: timeout\n")
             status = "timeout"
 
         runtime = int(time.time() - start_time)
+        print(f"✅ Benchmark completed. Log saved to: {log_file}")
         return status, runtime
 
     def _generate_param_combinations(self, param_ranges: Dict[str, List[Any]]) -> List[Dict[str, Any]]:
@@ -539,6 +587,7 @@ class VLLMBenchmark:
                 num_prompts = concurrency * cc_mult if concurrency is not None else None
                 
                 # Build iteration suffix for file naming
+                # For logs, exclude dataset name (only use scenario or concurrency)
                 iter_parts = []
                 if dataset is not None:
                     iter_parts.append(f"dataset_{dataset}")
@@ -547,6 +596,14 @@ class VLLMBenchmark:
                 if concurrency is not None:
                     iter_parts.append(f"conc{concurrency}")
                 iter_suffix = "_".join(iter_parts) if iter_parts else f"iter{iter_idx}"
+                
+                # Build log suffix (without dataset name)
+                log_parts = []
+                if scenario_type is not None:
+                    log_parts.append(f"scenario_{scenario_type}")
+                if concurrency is not None:
+                    log_parts.append(f"conc{concurrency}")
+                log_suffix = "_".join(log_parts) if log_parts else f"iter{iter_idx}"
                 
                 # Update result file with iteration info
                 iter_result_file = scenario_dir / 'results' / f"{combo_result_prefix}_{iter_suffix}.json"
@@ -643,11 +700,17 @@ class VLLMBenchmark:
                 iter_bench_config['variables']['result_dir'] = str(iter_output_dir)
                 iter_bench_config['variables']['output_dir'] = str(iter_output_dir)  # Common alias for MLPerf
 
+                # Create log file for this benchmark iteration (without dataset name)
+                logs_dir = scenario_dir / 'logs'
+                logs_dir.mkdir(parents=True, exist_ok=True)
+                bench_log_file = logs_dir / f'benchmark_{log_suffix}.log'
+                
                 # Run benchmark (starts immediately, concurrent with delayed nsys start if applicable)
                 status, runtime = self._run_benchmark(
                     combo_scenario_name, port, concurrency, num_prompts,
                     input_len, output_len, iter_result_file,
                     iter_bench_config, scenario_dir,
+                    log_file=bench_log_file,
                     enable_profiling=torch_enabled
                 )
 

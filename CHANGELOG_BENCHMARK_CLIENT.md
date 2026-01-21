@@ -38,6 +38,12 @@ defaults:
   - Available as `{output_dir}` and `{result_dir}` variables
   - Perfect for MLPerf `--output-dir` argument - all results for a scenario go to the same directory
 
+- **Automatic log capture**: All benchmark client (MLPerf, vllm bench, etc.) stdout/stderr is automatically captured and saved
+  - Logs are saved to `{scenario_dir}/logs/benchmark_{iteration_suffix}.log`
+  - Each dataset/scenario combination or concurrency level gets its own log file
+  - Logs include command, working directory, timestamps, and full output
+  - Ensures MLPerf client logs are preserved even if MLPerf's own logging is empty
+
 ### 2. Configurable Benchmark Clients
 You can now specify any benchmark client command in YAML instead of being limited to `vllm bench serve`.
 
