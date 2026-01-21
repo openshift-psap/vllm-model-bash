@@ -542,6 +542,8 @@ class VLLMBenchmark:
             print(f"🌐 Port: {port}")
             print(f"⚙️  Params: {' '.join(full_params[:5])}...")
 
+            # Note: result_file is set here but iter_result_file is used in the loop
+            # This is kept for backward compatibility but iter_result_file includes param combo info
             result_file = scenario_dir / 'results' / f"{combo_result_prefix}.json"
 
             # Profiling settings
@@ -605,8 +607,19 @@ class VLLMBenchmark:
                     log_parts.append(f"conc{concurrency}")
                 log_suffix = "_".join(log_parts) if log_parts else f"iter{iter_idx}"
                 
-                # Update result file with iteration info
-                iter_result_file = scenario_dir / 'results' / f"{combo_result_prefix}_{iter_suffix}.json"
+                # Create unique result file name that includes:
+                # 1. Parameter combination (if param_ranges used) - already in combo_result_prefix
+                # 2. Iteration info (dataset/scenario/concurrency) - in iter_suffix
+                # This ensures each run gets its own file and nothing gets overwritten
+                # When using param_ranges, each combination gets a unique file
+                # When using iterations (datasets/scenarios/concurrencies), each gets a unique file
+                if iter_suffix:
+                    iter_result_file = scenario_dir / 'results' / f"{combo_result_prefix}_{iter_suffix}.json"
+                else:
+                    # No iterations, just use the result prefix (which includes param combo if used)
+                    iter_result_file = scenario_dir / 'results' / f"{combo_result_prefix}.json"
+                
+                print(f"📄 Result file: {iter_result_file.name}")
 
                 # Update torch profiler prefix
                 if torch_enabled:

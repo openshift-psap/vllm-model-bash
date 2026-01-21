@@ -44,6 +44,12 @@ defaults:
   - Logs include command, working directory, timestamps, and full output
   - Ensures MLPerf client logs are preserved even if MLPerf's own logging is empty
 
+- **Unique result files for parameter ranges**: When using `param_ranges`, each parameter combination gets a unique result file
+  - File naming format: `{result_prefix}_{param_combo}_{iteration_suffix}.json`
+  - Example: `results_max_num_seq_256_gpu_memory_utilization_0.85_conc32.json`
+  - Prevents overwriting when testing multiple parameter combinations
+  - Each combination + iteration gets its own file, ensuring no data loss
+
 ### 2. Configurable Benchmark Clients
 You can now specify any benchmark client command in YAML instead of being limited to `vllm bench serve`.
 
