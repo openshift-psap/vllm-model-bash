@@ -2,9 +2,17 @@
 """
 upload_results.py - Upload benchmark results to experiment tracking system
 
-This script uploads log directories and creates sub-experiments for:
-- Each scenario in the study
-- Each parameter range combination (if param_ranges were used)
+This script uploads log directories and creates a hierarchical structure in MLflow:
+- Main experiment (parent)
+  - Study sub-experiment (nested run for the study)
+    - Scenario sub-experiment (nested run for each scenario)
+      - Parameter combination runs (if param_ranges were used)
+
+The script also:
+- Parses vLLM server logs to extract command-line arguments
+- Logs vLLM arguments as MLflow tags for easy filtering
+- Uploads all log files and result files as artifacts
+- Extracts metrics from JSON result files
 
 Supports MLflow and can be extended for other experiment tracking systems.
 
@@ -18,6 +26,7 @@ Example:
 import argparse
 import json
 import re
+import shlex
 import shutil
 import sys
 from pathlib import Path
@@ -71,6 +80,101 @@ def get_log_directories(scenario_dir: Path) -> List[Path]:
     # Return all log files
     log_files = list(logs_dir.glob('*.log'))
     return sorted(log_files)
+
+
+def get_server_log_file(scenario_dir: Path, param_combo_name: Optional[str] = None) -> Optional[Path]:
+    """Get the vLLM server log file for a scenario."""
+    logs_dir = scenario_dir / 'logs'
+    if not logs_dir.exists():
+        return None
+    
+    # Try to find server log file
+    # Pattern: vllm_server_*.log
+    server_logs = list(logs_dir.glob('vllm_server_*.log'))
+    if server_logs:
+        # If param_combo_name is provided, try to match it in the filename
+        if param_combo_name:
+            for log_file in server_logs:
+                if param_combo_name in log_file.name:
+                    return log_file
+        # Otherwise, return the first one (or most recent if multiple)
+        return sorted(server_logs)[-1] if server_logs else None
+    
+    return None
+
+
+def parse_vllm_server_args(log_file: Path) -> Dict[str, str]:
+    """
+    Parse vLLM server command line arguments from log file.
+    
+    Looks for lines containing 'vllm serve' command and extracts arguments.
+    Returns a dictionary of argument names to values.
+    """
+    if not log_file or not log_file.exists():
+        return {}
+    
+    args_dict = {}
+    
+    try:
+        with open(log_file, 'r', encoding='utf-8', errors='ignore') as f:
+            content = f.read()
+            
+            # Look for vllm serve command
+            # Pattern: vllm serve <model> --port <port> [args...]
+            # Also handle cases where it might be wrapped (e.g., "nsys profile ... vllm serve ...")
+            # Match vllm serve command with arguments
+            # This regex captures the command line after "vllm serve"
+            # Try to match the full command line, handling both single-line and multi-line cases
+            patterns = [
+                # Direct vllm serve command
+                r'vllm\s+serve\s+[^\s]+\s+(?:--port\s+\d+\s+)?(.*?)(?:\n|$)',
+                # Command might be in a log line with other text
+                r'(?:^|[\s>])(?:python[0-9]*\s+)?vllm\s+serve\s+[^\s]+\s+(?:--port\s+\d+\s+)?(.*?)(?:\n|$)',
+            ]
+            
+            args_string = None
+            for pattern in patterns:
+                matches = re.findall(pattern, content, re.MULTILINE | re.IGNORECASE)
+                if matches:
+                    # Take the first match (usually the command that started the server)
+                    args_string = matches[0].strip()
+                    break
+            
+            if args_string:
+                
+                # Parse arguments
+                # Handle both --arg value and --arg=value formats
+                # Split by spaces but handle quoted values
+                try:
+                    parts = shlex.split(args_string)
+                except ValueError:
+                    # Fallback: simple split if shlex fails
+                    parts = args_string.split()
+                
+                i = 0
+                while i < len(parts):
+                    arg = parts[i]
+                    if arg.startswith('--'):
+                        # Remove leading --
+                        arg_name = arg[2:]
+                        
+                        # Check if it's --arg=value format
+                        if '=' in arg_name:
+                            arg_name, arg_value = arg_name.split('=', 1)
+                            args_dict[arg_name] = arg_value
+                        else:
+                            # Check if next part is a value (not another --arg)
+                            if i + 1 < len(parts) and not parts[i + 1].startswith('--'):
+                                args_dict[arg_name] = parts[i + 1]
+                                i += 1
+                            else:
+                                # Boolean flag (no value)
+                                args_dict[arg_name] = "true"
+                    i += 1
+    except Exception as e:
+        print(f"  ⚠️  Warning: Could not parse server log {log_file.name}: {e}")
+    
+    return args_dict
 
 
 def get_result_files(scenario_dir: Path, param_combo_dir: Optional[Path] = None) -> List[Path]:
@@ -139,11 +243,11 @@ def create_mlflow_experiment(
 def upload_scenario_to_mlflow(
     study_dir: Path,
     scenario_dir: Path,
-    experiment_name: str,
+    parent_run_id: Optional[str],
     param_combo_name: Optional[str] = None,
     dry_run: bool = False
 ):
-    """Upload a scenario (or param combo) to MLflow as a sub-experiment/run."""
+    """Upload a scenario (or param combo) to MLflow as a nested run."""
     scenario_name = parse_scenario_name(scenario_dir)
     
     # Create run name
@@ -157,32 +261,54 @@ def upload_scenario_to_mlflow(
         print(f"  Scenario: {scenario_name}")
         if param_combo_name:
             print(f"  Param combo: {param_combo_name}")
+        if parent_run_id:
+            print(f"  Parent run ID: {parent_run_id}")
         
         # List what would be uploaded
         log_files = get_log_directories(scenario_dir)
         param_combo_dir = scenario_dir / 'results' / param_combo_name if param_combo_name else None
         result_files = get_result_files(scenario_dir, param_combo_dir)
+        server_log = get_server_log_file(scenario_dir, param_combo_name)
         
         print(f"  Log files ({len(log_files)}):")
         for log_file in log_files:
             print(f"    - {log_file.relative_to(study_dir)}")
         
+        if server_log:
+            print(f"  Server log: {server_log.relative_to(study_dir)}")
+            server_args = parse_vllm_server_args(server_log)
+            if server_args:
+                print(f"  Extracted vLLM args ({len(server_args)}):")
+                for key, value in sorted(server_args.items()):
+                    print(f"    --{key} = {value}")
+        
         print(f"  Result files ({len(result_files)}):")
         for result_file in result_files:
             print(f"    - {result_file.relative_to(study_dir)}")
         
-        return
+        return None
     
     if not MLFLOW_AVAILABLE:
         print(f"Error: mlflow not available. Skipping {run_name}")
-        return
+        return None
     
     try:
-        with mlflow.start_run(run_name=run_name, nested=True):
+        # Start nested run under parent
+        with mlflow.start_run(run_name=run_name, nested=True) as run:
             # Log tags
             mlflow.set_tag("scenario", scenario_name)
             if param_combo_name:
                 mlflow.set_tag("param_combo", param_combo_name)
+            
+            # Parse and log vLLM server arguments as tags
+            server_log = get_server_log_file(scenario_dir, param_combo_name)
+            if server_log:
+                server_args = parse_vllm_server_args(server_log)
+                if server_args:
+                    for arg_name, arg_value in server_args.items():
+                        # Log as tag (tags are better for filtering/searching)
+                        mlflow.set_tag(f"vllm_arg_{arg_name}", str(arg_value))
+                    print(f"  ✅ Extracted {len(server_args)} vLLM arguments from server log")
             
             # Log log files as artifacts
             log_files = get_log_directories(scenario_dir)
@@ -231,9 +357,11 @@ def upload_scenario_to_mlflow(
                 mlflow.log_param("param_combo", param_combo_name)
             
             print(f"✅ Uploaded run: {run_name}")
+            return run.info.run_id
     
     except Exception as e:
         print(f"❌ Error uploading {run_name}: {e}")
+        return None
 
 
 def main():
@@ -329,37 +457,150 @@ Examples:
             print("Error: Could not create/get MLflow experiment")
             sys.exit(1)
     
-    # Process each scenario
-    for scenario_dir in scenario_dirs:
-        scenario_name = parse_scenario_name(scenario_dir)
-        print(f"\n📋 Processing scenario: {scenario_name}")
-        
-        # Detect parameter combinations
-        param_combos = detect_param_combinations(scenario_dir)
-        
-        if len(param_combos) > 1 or (len(param_combos) == 1 and param_combos[0][0] is not None):
-            # Param ranges were used - create sub-experiment for each combo
-            print(f"  🔄 Found {len(param_combos)} parameter combination(s)")
+    # Create study sub-experiment (nested under main experiment)
+    study_name = study_dir.name
+    if not args.dry_run:
+        print(f"\n📚 Creating study sub-experiment: {study_name}")
+        with mlflow.start_run(run_name=study_name, nested=True) as study_run:
+            # Log study metadata
+            mlflow.set_tag("study_name", study_name)
+            mlflow.log_param("study_dir", str(study_dir))
             
-            for param_combo_name, param_combo_dir in param_combos:
-                print(f"  📦 Processing param combo: {param_combo_name}")
-                upload_scenario_to_mlflow(
-                    study_dir,
-                    scenario_dir,
-                    experiment_name,
-                    param_combo_name,
-                    args.dry_run
-                )
-        else:
-            # No param ranges - single sub-experiment for scenario
-            print(f"  📦 No param ranges detected")
-            upload_scenario_to_mlflow(
-                study_dir,
-                scenario_dir,
-                experiment_name,
-                None,
-                args.dry_run
-            )
+            # Load and log config if available
+            if config:
+                try:
+                    import yaml
+                    config_str = yaml.dump(config, default_flow_style=False)
+                    mlflow.log_text(config_str, artifact_file="config.yaml")
+                except Exception:
+                    pass
+            
+            study_run_id = study_run.info.run_id
+            
+            # Process each scenario (nested under study)
+            for scenario_dir in scenario_dirs:
+                scenario_name = parse_scenario_name(scenario_dir)
+                print(f"\n📋 Processing scenario: {scenario_name}")
+                
+                # Create scenario sub-experiment (nested under study)
+                with mlflow.start_run(run_name=scenario_name, nested=True) as scenario_run:
+                    scenario_run_id = scenario_run.info.run_id
+                    
+                    # Log scenario metadata
+                    mlflow.set_tag("scenario", scenario_name)
+                    mlflow.log_param("scenario_dir", str(scenario_dir.relative_to(study_dir)))
+                    
+                    # Parse and log vLLM server arguments as tags (for scenario-level)
+                    server_log = get_server_log_file(scenario_dir, None)
+                    if server_log:
+                        server_args = parse_vllm_server_args(server_log)
+                        if server_args:
+                            for arg_name, arg_value in server_args.items():
+                                mlflow.set_tag(f"vllm_arg_{arg_name}", str(arg_value))
+                            print(f"  ✅ Extracted {len(server_args)} vLLM arguments from server log")
+                    
+                    # Detect parameter combinations
+                    param_combos = detect_param_combinations(scenario_dir)
+                    
+                    if len(param_combos) > 1 or (len(param_combos) == 1 and param_combos[0][0] is not None):
+                        # Param ranges were used - create runs for each combo
+                        print(f"  🔄 Found {len(param_combos)} parameter combination(s)")
+                        
+                        for param_combo_name, param_combo_dir in param_combos:
+                            print(f"  📦 Processing param combo: {param_combo_name}")
+                            upload_scenario_to_mlflow(
+                                study_dir,
+                                scenario_dir,
+                                scenario_run_id,
+                                param_combo_name,
+                                args.dry_run
+                            )
+                    else:
+                        # No param ranges - upload artifacts directly to scenario run
+                        print(f"  📦 No param ranges detected - uploading to scenario run")
+                        
+                        # Upload log files as artifacts
+                        log_files = get_log_directories(scenario_dir)
+                        if log_files:
+                            logs_artifact_dir = Path("logs")
+                            logs_artifact_dir.mkdir(exist_ok=True)
+                            
+                            for log_file in log_files:
+                                artifact_path = logs_artifact_dir / log_file.name
+                                shutil.copy2(log_file, artifact_path)
+                            
+                            mlflow.log_artifacts(logs_artifact_dir, artifact_path="logs")
+                            shutil.rmtree(logs_artifact_dir)
+                            print(f"  ✅ Uploaded {len(log_files)} log files")
+                        
+                        # Upload result files as artifacts
+                        result_files = get_result_files(scenario_dir, None)
+                        if result_files:
+                            results_artifact_dir = Path("results")
+                            results_artifact_dir.mkdir(exist_ok=True)
+                            
+                            for result_file in result_files:
+                                artifact_path = results_artifact_dir / result_file.name
+                                shutil.copy2(result_file, artifact_path)
+                                
+                                # Try to parse and log metrics from JSON
+                                try:
+                                    with open(result_file, 'r') as f:
+                                        data = json.load(f)
+                                        if isinstance(data, dict):
+                                            # Log numeric metrics
+                                            for key, value in data.items():
+                                                if isinstance(value, (int, float)):
+                                                    mlflow.log_metric(key, value)
+                                except Exception:
+                                    pass  # Skip if not JSON or not parseable
+                            
+                            mlflow.log_artifacts(results_artifact_dir, artifact_path="results")
+                            shutil.rmtree(results_artifact_dir)
+                            print(f"  ✅ Uploaded {len(result_files)} result files")
+    else:
+        # Dry run mode
+        print(f"\n[DRY RUN] Would create study sub-experiment: {study_name}")
+        
+        # Process each scenario
+        for scenario_dir in scenario_dirs:
+            scenario_name = parse_scenario_name(scenario_dir)
+            print(f"\n📋 Processing scenario: {scenario_name}")
+            print(f"  [DRY RUN] Would create scenario sub-experiment: {scenario_name}")
+            
+            # Parse and log vLLM server arguments (dry run)
+            server_log = get_server_log_file(scenario_dir, None)
+            if server_log:
+                server_args = parse_vllm_server_args(server_log)
+                if server_args:
+                    print(f"  Would extract {len(server_args)} vLLM arguments from server log")
+                    for key, value in sorted(list(server_args.items())[:5]):  # Show first 5
+                        print(f"    --{key} = {value}")
+                    if len(server_args) > 5:
+                        print(f"    ... and {len(server_args) - 5} more")
+            
+            # Detect parameter combinations
+            param_combos = detect_param_combinations(scenario_dir)
+            
+            if len(param_combos) > 1 or (len(param_combos) == 1 and param_combos[0][0] is not None):
+                # Param ranges were used - create runs for each combo
+                print(f"  🔄 Found {len(param_combos)} parameter combination(s)")
+                
+                for param_combo_name, param_combo_dir in param_combos:
+                    print(f"  📦 Processing param combo: {param_combo_name}")
+                    upload_scenario_to_mlflow(
+                        study_dir,
+                        scenario_dir,
+                        None,
+                        param_combo_name,
+                        args.dry_run
+                    )
+            else:
+                # No param ranges - would upload directly to scenario run
+                print(f"  📦 No param ranges detected - would upload to scenario run")
+                log_files = get_log_directories(scenario_dir)
+                result_files = get_result_files(scenario_dir, None)
+                print(f"    Would upload {len(log_files)} log files and {len(result_files)} result files")
     
     print(f"\n✅ Upload complete!")
 
