@@ -36,8 +36,8 @@ defaults:
         - "Testing GPTOSS Serve"
     
     # Variables for substitution
-    # Note: result_dir and output_dir are automatically set to iteration-specific directories
-    # Format: {scenario_dir}/results/dataset_{dataset}_scenario_{scenario}
+    # Note: result_dir and output_dir are automatically set to the scenario's results directory
+    # Format: {scenario_dir}/results/ (all MLPerf results for this scenario go here)
     variables:
       target_qps: 2  # Can be overridden per scenario
     

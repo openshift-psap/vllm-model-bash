@@ -33,10 +33,10 @@ defaults:
 - Specify both for cartesian product (all combinations)
 - Variables `{dataset}` and `{scenario}` are automatically available
 - Also available as `{dataset_path}` and `{scenario_type}` aliases
-- **Automatic output directory**: Each dataset/scenario combination gets its own output directory
-  - Format: `{scenario_dir}/results/dataset_{dataset}_scenario_{scenario}/`
+- **Automatic output directory**: MLPerf results are saved directly to the scenario's results directory
+  - Format: `{scenario_dir}/results/`
   - Available as `{output_dir}` and `{result_dir}` variables
-  - Perfect for MLPerf `--output-dir` argument to keep results organized
+  - Perfect for MLPerf `--output-dir` argument - all results for a scenario go to the same directory
 
 ### 2. Configurable Benchmark Clients
 You can now specify any benchmark client command in YAML instead of being limited to `vllm bench serve`.
