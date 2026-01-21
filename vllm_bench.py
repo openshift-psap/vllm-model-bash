@@ -1,6 +1,18 @@
 #!/usr/bin/env python3
 """
 vllm_bench.py - Scenario-based vLLM benchmarking tool
+
+A flexible benchmarking framework for vLLM servers that supports:
+- Multiple benchmark clients (vLLM bench, MLPerf, custom)
+- Parameter range testing (automatic server configuration variations)
+- MLPerf-style iteration over datasets and scenarios
+- Integrated profiling (Nsight Systems, PyTorch profiler)
+- Organized output structure with logs, results, and profiles
+
+Usage:
+    python vllm_bench.py config.yaml [--scenario SCENARIOS] [--delay DELAY] [--duration DURATION]
+
+See README.md for usage examples and ARCHITECTURE.md for design details.
 """
 
 import argparse
@@ -24,8 +36,37 @@ import yaml
 
 
 class VLLMBenchmark:
+    """
+    Main benchmark orchestrator class.
+    
+    Manages the entire benchmarking workflow:
+    - Loads and validates YAML configuration
+    - Creates study directory structure
+    - Executes scenarios with parameter ranges
+    - Manages server lifecycle
+    - Executes benchmark clients
+    - Aggregates results
+    
+    Attributes:
+        config_path: Path to YAML configuration file
+        scenario_filter: Optional list of scenario names to run
+        nsys_delay: Optional delay before starting nsys profiling
+        nsys_duration: Optional duration for nsys profiling
+        config: Loaded configuration dictionary
+        study_dir: Path to study output directory
+        summary_data: List of summary records for CSV output
+        server_process: Current vLLM server process (if running)
+    """
     def __init__(self, config_path: str, scenario_filter: Optional[List[str]] = None,
                  nsys_delay: Optional[float] = None, nsys_duration: Optional[float] = None):
+        """Initialize benchmark orchestrator.
+        
+        Args:
+            config_path: Path to YAML configuration file
+            scenario_filter: Optional list of scenario names to run (filters config scenarios)
+            nsys_delay: Optional delay in seconds before starting nsys profiling
+            nsys_duration: Optional duration in seconds for nsys profiling (auto-stop)
+        """
         self.config_path = Path(config_path)
         self.scenario_filter = scenario_filter
         self.nsys_delay = nsys_delay
@@ -205,7 +246,21 @@ class VLLMBenchmark:
         time.sleep(2)
 
     def _substitute_variables(self, template: str, context: Dict[str, Any]) -> str:
-        """Substitute variables in template string using {variable} syntax."""
+        """Substitute variables in template string using {variable} syntax.
+        
+        Uses Python's str.format() to replace {variable} placeholders with values
+        from the context dictionary.
+        
+        Args:
+            template: String with {variable} placeholders
+            context: Dictionary of variable names to values
+            
+        Returns:
+            String with variables substituted
+            
+        Raises:
+            ValueError: If a variable in template is missing from context
+        """
         try:
             return template.format(**context)
         except KeyError as e:
@@ -216,7 +271,19 @@ class VLLMBenchmark:
         bench_config: Dict[str, Any],
         context: Dict[str, Any]
     ) -> List[str]:
-        """Build benchmark command from config with variable substitution."""
+        """Build benchmark command from config with variable substitution.
+        
+        Supports two modes:
+        1. New configurable mode: Uses 'command' section from bench_config
+        2. Legacy mode: Builds hardcoded 'vllm bench serve' command
+        
+        Args:
+            bench_config: Benchmark configuration dictionary
+            context: Variable substitution context
+            
+        Returns:
+            List of command arguments (executable + args)
+        """
         # Check if new command-based config exists
         if 'command' in bench_config:
             cmd_config = bench_config['command']
@@ -278,7 +345,29 @@ class VLLMBenchmark:
         log_file: Optional[Path] = None,
         enable_profiling: bool = False
     ) -> tuple[str, int]:
-        """Run benchmark with configurable client."""
+        """Run benchmark with configurable client.
+        
+        Executes the benchmark command defined in bench_config, capturing all output
+        to a log file. Supports both configurable commands and legacy vllm bench mode.
+        
+        Args:
+            scenario_name: Name of the scenario being run
+            port: Server port number
+            concurrency: Concurrency level (None for MLPerf-style iterations)
+            num_prompts: Number of prompts (None for MLPerf-style iterations)
+            input_len: Input sequence length
+            output_len: Output sequence length
+            result_file: Path to result file for benchmark output
+            bench_config: Benchmark configuration dictionary
+            scenario_dir: Directory for scenario outputs
+            log_file: Optional path to log file (auto-generated if None)
+            enable_profiling: Whether PyTorch profiling is enabled
+            
+        Returns:
+            Tuple of (status, runtime_seconds):
+            - status: "success", "failed", or "timeout"
+            - runtime_seconds: Execution time in seconds
+        """
         model_name = self.config['model']['name']
         
         # Build context for variable substitution (without timeout first)
@@ -308,16 +397,17 @@ class VLLMBenchmark:
                 context[key] = value
         
         # Process timeout value (may need variable substitution)
+        # Convert to int since subprocess timeout expects int, and command args may expect int
         timeout_raw = bench_config.get('timeout', 3600)
         if isinstance(timeout_raw, str) and '{' in timeout_raw:
             # Timeout contains variables, substitute them
             timeout_str = self._substitute_variables(timeout_raw, context)
-            timeout_value = float(timeout_str)
+            timeout_value = int(float(timeout_str))  # Convert to int for subprocess
         else:
-            timeout_value = float(timeout_raw)
+            timeout_value = int(float(timeout_raw))  # Convert to int for subprocess
         
-        # Add timeout to context for use in command arguments
-        context['timeout'] = timeout_value
+        # Add timeout to context for use in command arguments (as string for substitution)
+        context['timeout'] = str(timeout_value)
 
         # Build command
         cmd = self._build_benchmark_command(bench_config, context)
@@ -408,9 +498,16 @@ class VLLMBenchmark:
     def _generate_param_combinations(self, param_ranges: Dict[str, List[Any]]) -> List[Dict[str, Any]]:
         """Generate all combinations of parameter values from ranges.
         
-        Example:
-            param_ranges = {'max_num_seq': [256, 512], 'gpu_memory_util': [0.9, 0.95]}
-            Returns: [
+        Creates a cartesian product of all parameter values. Each combination
+        will result in a separate server run with those parameter values applied.
+        
+        Args:
+            param_ranges: Dictionary mapping parameter names to lists of values
+                Example: {'max_num_seq': [256, 512], 'gpu_memory_util': [0.9, 0.95]}
+                
+        Returns:
+            List of dictionaries, each containing one parameter combination
+            Example: [
                 {'max_num_seq': 256, 'gpu_memory_util': 0.9},
                 {'max_num_seq': 256, 'gpu_memory_util': 0.95},
                 {'max_num_seq': 512, 'gpu_memory_util': 0.9},
@@ -434,7 +531,17 @@ class VLLMBenchmark:
     def _apply_param_to_args(self, base_params: List[str], param_name: str, param_value: Any) -> List[str]:
         """Apply a parameter value to the params list, replacing or adding the argument.
         
-        Converts param_name like 'max_num_seq' to '--max-num-seq'.
+        Converts parameter names from snake_case to kebab-case for command-line arguments.
+        If the parameter already exists in base_params, it is replaced; otherwise it is added.
+        
+        Args:
+            base_params: List of existing command-line arguments
+            param_name: Parameter name in snake_case (e.g., 'max_num_seq')
+            param_value: Parameter value to set
+            
+        Returns:
+            New list of arguments with parameter applied
+            Example: 'max_num_seq' -> '--max-num-seq'
         """
         arg_name = f"--{param_name.replace('_', '-')}"
         
@@ -455,7 +562,28 @@ class VLLMBenchmark:
         return new_params
 
     def _run_scenario(self, scenario: Dict):
-        """Run a single scenario, optionally with parameter ranges."""
+        """Run a single scenario, optionally with parameter ranges.
+        
+        Executes a complete scenario workflow:
+        1. Generates parameter combinations if param_ranges specified
+        2. For each parameter combination:
+           - Starts vLLM server with those parameters
+           - Generates iteration items (datasets/scenarios or concurrencies)
+           - For each iteration:
+             - Runs benchmark client
+             - Captures logs and results
+             - Records summary
+           - Stops server
+        
+        Args:
+            scenario: Scenario configuration dictionary containing:
+                - name: Scenario name
+                - port: Server port
+                - params: Server parameters
+                - param_ranges: Optional parameter ranges to test
+                - bench: Benchmark configuration
+                - profile: Optional profiling settings
+        """
         scenario_name = scenario['name']
         print("\n" + "=" * 50)
         print(f"📋 Scenario: {scenario_name}")
