@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-vllm_bench.py - Scenario-based vLLM benchmarking tool
+sglang_bench.py - Scenario-based SGLang benchmarking tool
 
-A flexible benchmarking framework for vLLM servers that supports:
+A flexible benchmarking framework for SGLang servers that supports:
 - Multiple benchmark clients (vLLM bench, MLPerf, custom)
 - Parameter range testing (automatic server configuration variations)
 - MLPerf-style iteration over datasets and scenarios
@@ -10,7 +10,7 @@ A flexible benchmarking framework for vLLM servers that supports:
 - Organized output structure with logs, results, and profiles
 
 Usage:
-    python vllm_bench.py config.yaml [--scenario SCENARIOS] [--delay DELAY] [--duration DURATION]
+    python sglang_bench.py config.yaml [--scenario SCENARIOS] [--delay DELAY] [--duration DURATION]
 
 See README.md for usage examples and ARCHITECTURE.md for design details.
 """
@@ -35,9 +35,9 @@ import requests
 import yaml
 
 
-class VLLMBenchmark:
+class SGLangBenchmark:
     """
-    Main benchmark orchestrator class.
+    Main benchmark orchestrator class for SGLang servers.
     
     Manages the entire benchmarking workflow:
     - Loads and validates YAML configuration
@@ -55,7 +55,7 @@ class VLLMBenchmark:
         config: Loaded configuration dictionary
         study_dir: Path to study output directory
         summary_data: List of summary records for CSV output
-        server_process: Current vLLM server process (if running)
+        server_process: Current SGLang server process (if running)
     """
     def __init__(self, config_path: str, scenario_filter: Optional[List[str]] = None,
                  nsys_delay: Optional[float] = None, nsys_duration: Optional[float] = None):
@@ -131,7 +131,7 @@ class VLLMBenchmark:
             print(f"  {key}={value}")
 
     def _wait_for_server(self, port: int, timeout: int = 120) -> bool:
-        """Wait for vLLM server to be ready."""
+        """Wait for SGLang server to be ready."""
         url = f"http://localhost:{port}/v1/models"
         print(f"⏳ Waiting for server on port {port}...")
 
@@ -185,7 +185,7 @@ class VLLMBenchmark:
         nsys_profile: bool = False,
         nsys_args: str = ""
     ) -> tuple[Optional[subprocess.Popen], Optional[str]]:
-        """Start vLLM server. Returns (process, nsys_session_id)."""
+        """Start SGLang server. Returns (process, nsys_session_id)."""
         model_name = self.config['model']['name']
 
         use_session_mode = False
@@ -201,7 +201,8 @@ class VLLMBenchmark:
 
             cmd = ["nsys", "profile"] + nsys_launch_args.split()
 
-        cmd += ["vllm", "serve", model_name, "--port", str(port)] + params
+        # SGLang uses python3 -m sglang.launch_server with --model-path
+        cmd += ["python3", "-m", "sglang.launch_server", "--model-path", model_name, "--port", str(port)] + params
 
         print(f"▶️  Starting server: {' '.join(cmd[:5])}...")
 
@@ -230,7 +231,7 @@ class VLLMBenchmark:
         return process, nsys_session_id
 
     def _stop_server(self, process: subprocess.Popen):
-        """Stop vLLM server gracefully."""
+        """Stop SGLang server gracefully."""
         if not process:
             return
 
@@ -569,7 +570,7 @@ class VLLMBenchmark:
         Executes a complete scenario workflow:
         1. Generates parameter combinations if param_ranges specified
         2. For each parameter combination:
-           - Starts vLLM server with those parameters
+           - Starts SGLang server with those parameters
            - Generates iteration items (datasets/scenarios or concurrencies)
            - For each iteration:
              - Runs benchmark client
@@ -663,7 +664,7 @@ class VLLMBenchmark:
                 combo_scenario_name = scenario_name
                 combo_result_prefix = result_prefix
 
-            log_file = scenario_dir / 'logs' / f'vllm_server_{combo_scenario_name}.log'
+            log_file = scenario_dir / 'logs' / f'sglang_server_{combo_scenario_name}.log'
 
             # Merge parameters
             base_params = self.config['model'].get('base_params', '')
@@ -865,7 +866,7 @@ class VLLMBenchmark:
                 
                 # Set result_dir and output_dir to the scenario's results directory
                 # This ensures MLPerf output-dir goes to the scenario's results directory
-                # Use absolute path to ensure it's relative to where vllm_bench.py is running
+                # Use absolute path to ensure it's relative to where sglang_bench.py is running
                 iter_output_dir_abs = iter_output_dir.resolve()
                 iter_bench_config['variables']['result_dir'] = str(iter_output_dir_abs)
                 iter_bench_config['variables']['output_dir'] = str(iter_output_dir_abs)  # Common alias for MLPerf
@@ -944,7 +945,7 @@ class VLLMBenchmark:
 
     def run(self):
         """Run all scenarios."""
-        print("🚀 vLLM Scenario Benchmark")
+        print("🚀 SGLang Scenario Benchmark")
         print(f"🎯 Model: {self.config['model']['name']}")
         print(f"📊 Scenarios: {len(self.config['scenarios'])}")
 
@@ -998,7 +999,7 @@ class VLLMBenchmark:
 
 def main():
     parser = argparse.ArgumentParser(
-        description="vLLM scenario-based benchmark tool",
+        description="SGLang scenario-based benchmark tool",
         formatter_class=argparse.RawDescriptionHelpFormatter
     )
     parser.add_argument('config', help='Path to scenario config YAML file')
@@ -1025,7 +1026,7 @@ def main():
         scenario_filter = [s.strip() for s in args.scenarios.split(',')]
 
     try:
-        benchmark = VLLMBenchmark(
+        benchmark = SGLangBenchmark(
             args.config,
             scenario_filter,
             nsys_delay=args.delay,
