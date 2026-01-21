@@ -281,7 +281,7 @@ class VLLMBenchmark:
         """Run benchmark with configurable client."""
         model_name = self.config['model']['name']
         
-        # Build context for variable substitution
+        # Build context for variable substitution (without timeout first)
         context = {
             'port': port,
             'model_name': model_name,
@@ -306,6 +306,18 @@ class VLLMBenchmark:
                 if isinstance(value, str) and '{' in value:
                     value = self._substitute_variables(value, context)
                 context[key] = value
+        
+        # Process timeout value (may need variable substitution)
+        timeout_raw = bench_config.get('timeout', 3600)
+        if isinstance(timeout_raw, str) and '{' in timeout_raw:
+            # Timeout contains variables, substitute them
+            timeout_str = self._substitute_variables(timeout_raw, context)
+            timeout_value = float(timeout_str)
+        else:
+            timeout_value = float(timeout_raw)
+        
+        # Add timeout to context for use in command arguments
+        context['timeout'] = timeout_value
 
         # Build command
         cmd = self._build_benchmark_command(bench_config, context)
@@ -363,7 +375,7 @@ class VLLMBenchmark:
                     stderr=subprocess.STDOUT,  # Merge stderr into stdout
                     cwd=work_dir,
                     env=env,
-                    timeout=bench_config.get('timeout', 3600)
+                    timeout=timeout_value
                 )
                 
                 # Write footer
