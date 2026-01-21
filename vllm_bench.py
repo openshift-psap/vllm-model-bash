@@ -619,6 +619,10 @@ class VLLMBenchmark:
                         # Start nsys immediately (original behavior)
                         start_nsys_profiling()
 
+                # Create output directory for this iteration (for MLPerf output-dir)
+                iter_output_dir = scenario_dir / 'results' / iter_suffix
+                iter_output_dir.mkdir(parents=True, exist_ok=True)
+                
                 # Update bench_config variables with iteration values
                 iter_bench_config = copy.deepcopy(bench_config)
                 if 'variables' not in iter_bench_config:
@@ -632,6 +636,11 @@ class VLLMBenchmark:
                     iter_bench_config['variables']['scenario_type'] = scenario_type  # Common alias
                 if concurrency is not None:
                     iter_bench_config['variables']['concurrency'] = concurrency
+                
+                # Set result_dir to the iteration-specific output directory
+                # This ensures MLPerf output-dir goes to the right place
+                iter_bench_config['variables']['result_dir'] = str(iter_output_dir)
+                iter_bench_config['variables']['output_dir'] = str(iter_output_dir)  # Common alias for MLPerf
 
                 # Run benchmark (starts immediately, concurrent with delayed nsys start if applicable)
                 status, runtime = self._run_benchmark(
