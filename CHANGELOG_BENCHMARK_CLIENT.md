@@ -50,6 +50,17 @@ defaults:
   - Prevents overwriting when testing multiple parameter combinations
   - Each combination + iteration gets its own file, ensuring no data loss
 
+- **Parameter range subdirectories for MLPerf**: When using `param_ranges`, MLPerf output directories are organized in subdirectories
+  - Each parameter combination gets its own subdirectory: `{scenario_dir}/results/{param_combo}/`
+  - Example: `scenario_test/results/max_num_seq_256_gpu_memory_utilization_0.85/`
+  - MLPerf results go to the correct directory (not the client's working directory)
+  - Ensures results are properly organized and don't get mixed up
+
+- **Parameter range info in log files**: Log file names include parameter combination info when using `param_ranges`
+  - Format: `benchmark_{param_combo}_{scenario}_{concurrency}.log`
+  - Example: `benchmark_max_num_seq_256_gpu_memory_utilization_0.85_scenario_offline.log`
+  - Each parameter combination gets its own log file, making it easy to track which params were used
+
 ### 2. Configurable Benchmark Clients
 You can now specify any benchmark client command in YAML instead of being limited to `vllm bench serve`.
 

@@ -517,6 +517,7 @@ class VLLMBenchmark:
                 print(f"📋 Parameter combination {param_idx + 1}/{len(param_combinations)}: {param_combo}")
                 print(f"{'='*50}")
             else:
+                combo_suffix = ""  # Empty when no param ranges
                 combo_scenario_name = scenario_name
                 combo_result_prefix = result_prefix
 
@@ -600,7 +601,11 @@ class VLLMBenchmark:
                 iter_suffix = "_".join(iter_parts) if iter_parts else f"iter{iter_idx}"
                 
                 # Build log suffix (without dataset name)
+                # Include param range info if param_ranges are used
                 log_parts = []
+                if param_ranges and combo_suffix:
+                    # Add param combo suffix to log file name
+                    log_parts.append(combo_suffix)
                 if scenario_type is not None:
                     log_parts.append(f"scenario_{scenario_type}")
                 if concurrency is not None:
@@ -690,9 +695,17 @@ class VLLMBenchmark:
                         start_nsys_profiling()
 
                 # Set output directory to scenario's results directory (for MLPerf output-dir)
-                # MLPerf results go directly to the scenario's results directory
-                iter_output_dir = scenario_dir / 'results'
-                iter_output_dir.mkdir(parents=True, exist_ok=True)
+                # When param_ranges are used, create a subdirectory for each parameter combination
+                if param_ranges:
+                    # Create subdirectory for this parameter combination
+                    param_subdir = scenario_dir / 'results' / combo_suffix
+                    param_subdir.mkdir(parents=True, exist_ok=True)
+                    iter_output_dir = param_subdir
+                    print(f"📁 MLPerf output directory: {iter_output_dir}")
+                else:
+                    # No param ranges, use scenario's results directory directly
+                    iter_output_dir = scenario_dir / 'results'
+                    iter_output_dir.mkdir(parents=True, exist_ok=True)
                 
                 # Update bench_config variables with iteration values
                 iter_bench_config = copy.deepcopy(bench_config)
