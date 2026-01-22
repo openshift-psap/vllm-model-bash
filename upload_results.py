@@ -29,6 +29,7 @@ import re
 import shlex
 import shutil
 import sys
+import tempfile
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
@@ -240,6 +241,30 @@ def create_mlflow_experiment(
         return None
 
 
+def upload_directory_structure(source_dir: Path, dry_run: bool = False) -> Dict[str, int]:
+    """
+    Count files in each subdirectory of a scenario directory.
+    
+    Returns a dictionary mapping subdirectory names to file counts.
+    """
+    counts = {}
+    if not source_dir.exists():
+        return counts
+    
+    for item in source_dir.iterdir():
+        if item.is_dir():
+            # Count files recursively
+            file_count = sum(1 for _ in item.rglob('*') if _.is_file())
+            counts[item.name] = file_count
+        elif item.is_file():
+            # Files directly in the root
+            if 'root' not in counts:
+                counts['root'] = 0
+            counts['root'] += 1
+    
+    return counts
+
+
 def upload_scenario_to_mlflow(
     study_dir: Path,
     scenario_dir: Path,
@@ -264,27 +289,22 @@ def upload_scenario_to_mlflow(
         if parent_run_id:
             print(f"  Parent run ID: {parent_run_id}")
         
-        # List what would be uploaded
-        log_files = get_log_directories(scenario_dir)
-        param_combo_dir = scenario_dir / 'results' / param_combo_name if param_combo_name else None
-        result_files = get_result_files(scenario_dir, param_combo_dir)
+        # List directory structure
+        dir_counts = upload_directory_structure(scenario_dir, dry_run=True)
+        print(f"  Directory structure:")
+        for dir_name, file_count in sorted(dir_counts.items()):
+            print(f"    {dir_name}/ ({file_count} files)")
+        
         server_log = get_server_log_file(scenario_dir, param_combo_name)
-        
-        print(f"  Log files ({len(log_files)}):")
-        for log_file in log_files:
-            print(f"    - {log_file.relative_to(study_dir)}")
-        
         if server_log:
             print(f"  Server log: {server_log.relative_to(study_dir)}")
             server_args = parse_vllm_server_args(server_log)
             if server_args:
                 print(f"  Extracted vLLM args ({len(server_args)}):")
-                for key, value in sorted(server_args.items()):
+                for key, value in sorted(list(server_args.items())[:5]):  # Show first 5
                     print(f"    --{key} = {value}")
-        
-        print(f"  Result files ({len(result_files)}):")
-        for result_file in result_files:
-            print(f"    - {result_file.relative_to(study_dir)}")
+                if len(server_args) > 5:
+                    print(f"    ... and {len(server_args) - 5} more")
         
         return None
     
@@ -310,32 +330,32 @@ def upload_scenario_to_mlflow(
                         mlflow.set_tag(f"vllm_arg_{arg_name}", str(arg_value))
                     print(f"  ✅ Extracted {len(server_args)} vLLM arguments from server log")
             
-            # Log log files as artifacts
-            log_files = get_log_directories(scenario_dir)
-            if log_files:
-                logs_artifact_dir = Path("logs")
-                logs_artifact_dir.mkdir(exist_ok=True)
-                
-                for log_file in log_files:
-                    artifact_path = logs_artifact_dir / log_file.name
-                    shutil.copy2(log_file, artifact_path)
-                
-                mlflow.log_artifacts(logs_artifact_dir, artifact_path="logs")
-                shutil.rmtree(logs_artifact_dir)
-                print(f"  ✅ Uploaded {len(log_files)} log files")
+            # Upload entire scenario directory structure preserving folder hierarchy
+            # This will upload logs/, results/, profiles/, and all their contents
+            if scenario_dir.exists():
+                # Create a temporary copy to preserve structure
+                with tempfile.TemporaryDirectory() as temp_dir:
+                    temp_path = Path(temp_dir)
+                    # Copy entire scenario directory structure
+                    scenario_artifact_dir = temp_path / scenario_dir.name
+                    shutil.copytree(scenario_dir, scenario_artifact_dir, dirs_exist_ok=True)
+                    
+                    # Upload the entire directory structure
+                    mlflow.log_artifacts(scenario_artifact_dir, artifact_path="scenario")
+                    
+                    # Count files uploaded
+                    dir_counts = upload_directory_structure(scenario_dir)
+                    total_files = sum(dir_counts.values())
+                    print(f"  ✅ Uploaded scenario directory structure ({total_files} files)")
+                    for dir_name, file_count in sorted(dir_counts.items()):
+                        if file_count > 0:
+                            print(f"    - {dir_name}/ ({file_count} files)")
             
-            # Log result files as artifacts
+            # Also extract and log metrics from JSON result files
             param_combo_dir = scenario_dir / 'results' / param_combo_name if param_combo_name else None
             result_files = get_result_files(scenario_dir, param_combo_dir)
             if result_files:
-                results_artifact_dir = Path("results")
-                results_artifact_dir.mkdir(exist_ok=True)
-                
                 for result_file in result_files:
-                    artifact_path = results_artifact_dir / result_file.name
-                    shutil.copy2(result_file, artifact_path)
-                    
-                    # Try to parse and log metrics from JSON
                     try:
                         with open(result_file, 'r') as f:
                             data = json.load(f)
@@ -346,10 +366,6 @@ def upload_scenario_to_mlflow(
                                         mlflow.log_metric(key, value)
                     except Exception:
                         pass  # Skip if not JSON or not parseable
-                
-                mlflow.log_artifacts(results_artifact_dir, artifact_path="results")
-                shutil.rmtree(results_artifact_dir)
-                print(f"  ✅ Uploaded {len(result_files)} result files")
             
             # Log scenario directory path as parameter
             mlflow.log_param("scenario_dir", str(scenario_dir.relative_to(study_dir)))
@@ -361,6 +377,8 @@ def upload_scenario_to_mlflow(
     
     except Exception as e:
         print(f"❌ Error uploading {run_name}: {e}")
+        import traceback
+        traceback.print_exc()
         return None
 
 
@@ -519,31 +537,29 @@ Examples:
                         # No param ranges - upload artifacts directly to scenario run
                         print(f"  📦 No param ranges detected - uploading to scenario run")
                         
-                        # Upload log files as artifacts
-                        log_files = get_log_directories(scenario_dir)
-                        if log_files:
-                            logs_artifact_dir = Path("logs")
-                            logs_artifact_dir.mkdir(exist_ok=True)
-                            
-                            for log_file in log_files:
-                                artifact_path = logs_artifact_dir / log_file.name
-                                shutil.copy2(log_file, artifact_path)
-                            
-                            mlflow.log_artifacts(logs_artifact_dir, artifact_path="logs")
-                            shutil.rmtree(logs_artifact_dir)
-                            print(f"  ✅ Uploaded {len(log_files)} log files")
+                        # Upload entire scenario directory structure preserving folder hierarchy
+                        if scenario_dir.exists():
+                            with tempfile.TemporaryDirectory() as temp_dir:
+                                temp_path = Path(temp_dir)
+                                # Copy entire scenario directory structure
+                                scenario_artifact_dir = temp_path / scenario_dir.name
+                                shutil.copytree(scenario_dir, scenario_artifact_dir, dirs_exist_ok=True)
+                                
+                                # Upload the entire directory structure
+                                mlflow.log_artifacts(scenario_artifact_dir, artifact_path="scenario")
+                                
+                                # Count files uploaded
+                                dir_counts = upload_directory_structure(scenario_dir)
+                                total_files = sum(dir_counts.values())
+                                print(f"  ✅ Uploaded scenario directory structure ({total_files} files)")
+                                for dir_name, file_count in sorted(dir_counts.items()):
+                                    if file_count > 0:
+                                        print(f"    - {dir_name}/ ({file_count} files)")
                         
-                        # Upload result files as artifacts
+                        # Also extract and log metrics from JSON result files
                         result_files = get_result_files(scenario_dir, None)
                         if result_files:
-                            results_artifact_dir = Path("results")
-                            results_artifact_dir.mkdir(exist_ok=True)
-                            
                             for result_file in result_files:
-                                artifact_path = results_artifact_dir / result_file.name
-                                shutil.copy2(result_file, artifact_path)
-                                
-                                # Try to parse and log metrics from JSON
                                 try:
                                     with open(result_file, 'r') as f:
                                         data = json.load(f)
@@ -554,10 +570,6 @@ Examples:
                                                     mlflow.log_metric(key, value)
                                 except Exception:
                                     pass  # Skip if not JSON or not parseable
-                            
-                            mlflow.log_artifacts(results_artifact_dir, artifact_path="results")
-                            shutil.rmtree(results_artifact_dir)
-                            print(f"  ✅ Uploaded {len(result_files)} result files")
     else:
         # Dry run mode
         print(f"\n[DRY RUN] Would create study sub-experiment: {study_name}")
@@ -598,9 +610,12 @@ Examples:
             else:
                 # No param ranges - would upload directly to scenario run
                 print(f"  📦 No param ranges detected - would upload to scenario run")
-                log_files = get_log_directories(scenario_dir)
-                result_files = get_result_files(scenario_dir, None)
-                print(f"    Would upload {len(log_files)} log files and {len(result_files)} result files")
+                dir_counts = upload_directory_structure(scenario_dir, dry_run=True)
+                total_files = sum(dir_counts.values())
+                print(f"    Would upload scenario directory structure ({total_files} files):")
+                for dir_name, file_count in sorted(dir_counts.items()):
+                    if file_count > 0:
+                        print(f"      - {dir_name}/ ({file_count} files)")
     
     print(f"\n✅ Upload complete!")
 
