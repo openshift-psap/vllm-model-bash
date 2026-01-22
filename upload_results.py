@@ -183,26 +183,37 @@ def get_result_files(scenario_dir: Path, param_combo_dir: Optional[Path] = None)
 
 
 def find_mlperf_summary_file(scenario_dir: Path, param_combo_dir: Optional[Path] = None) -> Optional[Path]:
-    """Find mlperf_log_summary.txt file in results directory."""
+    """
+    Find mlperf_log_summary.txt file in results directory.
+    
+    When param_ranges are used, the structure is:
+    - scenario_dir/results/param_combo_name/mlperf_log_summary.txt
+    
+    When no param_ranges, the structure is:
+    - scenario_dir/results/mlperf_log_summary.txt
+    - or scenario_dir/results/subdir/mlperf_log_summary.txt (if MLPerf creates subdirs)
+    """
     if param_combo_dir:
+        # When param_combo_dir is provided, it's already the param combo subdirectory
+        # e.g., scenario_dir/results/param_combo_name
         search_dir = param_combo_dir
     else:
+        # No param ranges - search in results directory
         search_dir = scenario_dir / 'results'
     
     if not search_dir.exists():
         return None
     
-    # Look for mlperf_log_summary.txt
+    # First, check directly in the search directory
     summary_file = search_dir / 'mlperf_log_summary.txt'
     if summary_file.exists():
         return summary_file
     
-    # Also check subdirectories
-    for subdir in search_dir.iterdir():
-        if subdir.is_dir():
-            summary_file = subdir / 'mlperf_log_summary.txt'
-            if summary_file.exists():
-                return summary_file
+    # If not found directly, search recursively in subdirectories
+    # This handles cases where MLPerf creates additional subdirectories
+    for summary_file in search_dir.rglob('mlperf_log_summary.txt'):
+        if summary_file.is_file():
+            return summary_file
     
     return None
 
