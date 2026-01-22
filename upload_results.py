@@ -31,7 +31,7 @@ import shutil
 import sys
 import tempfile
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 try:
     import mlflow
@@ -104,78 +104,67 @@ def get_server_log_file(scenario_dir: Path, param_combo_name: Optional[str] = No
     return None
 
 
-def parse_vllm_server_args(log_file: Path) -> Dict[str, str]:
+def parse_vllm_server_log(log_file: Path) -> Dict[str, Any]:
     """
-    Parse vLLM server command line arguments from log file.
+    Parse vLLM server log file to extract:
+    1. API version (from "vLLM API server version X.X.X")
+    2. Non-default arguments (from "non-default args: {...}")
     
-    Looks for lines containing 'vllm serve' command and extracts arguments.
-    Returns a dictionary of argument names to values.
+    Returns a dictionary with 'version' and 'args' keys.
     """
     if not log_file or not log_file.exists():
-        return {}
+        return {'version': None, 'args': {}}
     
-    args_dict = {}
+    result = {'version': None, 'args': {}}
     
     try:
         with open(log_file, 'r', encoding='utf-8', errors='ignore') as f:
-            content = f.read()
-            
-            # Look for vllm serve command
-            # Pattern: vllm serve <model> --port <port> [args...]
-            # Also handle cases where it might be wrapped (e.g., "nsys profile ... vllm serve ...")
-            # Match vllm serve command with arguments
-            # This regex captures the command line after "vllm serve"
-            # Try to match the full command line, handling both single-line and multi-line cases
-            patterns = [
-                # Direct vllm serve command
-                r'vllm\s+serve\s+[^\s]+\s+(?:--port\s+\d+\s+)?(.*?)(?:\n|$)',
-                # Command might be in a log line with other text
-                r'(?:^|[\s>])(?:python[0-9]*\s+)?vllm\s+serve\s+[^\s]+\s+(?:--port\s+\d+\s+)?(.*?)(?:\n|$)',
-            ]
-            
-            args_string = None
-            for pattern in patterns:
-                matches = re.findall(pattern, content, re.MULTILINE | re.IGNORECASE)
-                if matches:
-                    # Take the first match (usually the command that started the server)
-                    args_string = matches[0].strip()
+            for line in f:
+                # Extract API version
+                # Pattern: "vLLM API server version 0.13.0"
+                version_match = re.search(r'vLLM\s+API\s+server\s+version\s+([\d.]+)', line, re.IGNORECASE)
+                if version_match:
+                    result['version'] = version_match.group(1)
+                
+                # Extract non-default args
+                # Pattern: "non-default args: {'key': 'value', ...}"
+                if 'non-default args:' in line:
+                    # Find the dictionary part after "non-default args:"
+                    dict_start = line.find('non-default args:') + len('non-default args:')
+                    dict_str = line[dict_start:].strip()
+                    
+                    # Try to parse as Python dict literal
+                    try:
+                        # Use eval to parse the dictionary (safe here as it's from our own logs)
+                        # The dict is in the format: {'key': 'value', ...}
+                        args_dict = eval(dict_str)
+                        if isinstance(args_dict, dict):
+                            result['args'] = {str(k): str(v) for k, v in args_dict.items()}
+                    except Exception:
+                        # Fallback: try to extract key-value pairs manually
+                        # Look for patterns like 'key': 'value' or 'key': value
+                        kv_pattern = r"'([^']+)':\s*(?:'([^']*)'|([^,}]+))"
+                        matches = re.findall(kv_pattern, dict_str)
+                        for match in matches:
+                            key = match[0]
+                            value = match[1] if match[1] else match[2].strip()
+                            result['args'][key] = value
+                    
+                    # Only process the first occurrence
                     break
-            
-            if args_string:
-                
-                # Parse arguments
-                # Handle both --arg value and --arg=value formats
-                # Split by spaces but handle quoted values
-                try:
-                    parts = shlex.split(args_string)
-                except ValueError:
-                    # Fallback: simple split if shlex fails
-                    parts = args_string.split()
-                
-                i = 0
-                while i < len(parts):
-                    arg = parts[i]
-                    if arg.startswith('--'):
-                        # Remove leading --
-                        arg_name = arg[2:]
-                        
-                        # Check if it's --arg=value format
-                        if '=' in arg_name:
-                            arg_name, arg_value = arg_name.split('=', 1)
-                            args_dict[arg_name] = arg_value
-                        else:
-                            # Check if next part is a value (not another --arg)
-                            if i + 1 < len(parts) and not parts[i + 1].startswith('--'):
-                                args_dict[arg_name] = parts[i + 1]
-                                i += 1
-                            else:
-                                # Boolean flag (no value)
-                                args_dict[arg_name] = "true"
-                    i += 1
     except Exception as e:
         print(f"  ⚠️  Warning: Could not parse server log {log_file.name}: {e}")
     
-    return args_dict
+    return result
+
+
+def parse_vllm_server_args(log_file: Path) -> Dict[str, str]:
+    """
+    Parse vLLM server log file and return non-default arguments.
+    This is a convenience wrapper around parse_vllm_server_log.
+    """
+    log_data = parse_vllm_server_log(log_file)
+    return log_data.get('args', {})
 
 
 def get_result_files(scenario_dir: Path, param_combo_dir: Optional[Path] = None) -> List[Path]:
@@ -191,6 +180,123 @@ def get_result_files(scenario_dir: Path, param_combo_dir: Optional[Path] = None)
     # Find all JSON result files
     result_files = list(search_dir.glob('*.json'))
     return sorted(result_files)
+
+
+def find_mlperf_summary_file(scenario_dir: Path, param_combo_dir: Optional[Path] = None) -> Optional[Path]:
+    """Find mlperf_log_summary.txt file in results directory."""
+    if param_combo_dir:
+        search_dir = param_combo_dir
+    else:
+        search_dir = scenario_dir / 'results'
+    
+    if not search_dir.exists():
+        return None
+    
+    # Look for mlperf_log_summary.txt
+    summary_file = search_dir / 'mlperf_log_summary.txt'
+    if summary_file.exists():
+        return summary_file
+    
+    # Also check subdirectories
+    for subdir in search_dir.iterdir():
+        if subdir.is_dir():
+            summary_file = subdir / 'mlperf_log_summary.txt'
+            if summary_file.exists():
+                return summary_file
+    
+    return None
+
+
+def parse_mlperf_summary(summary_file: Path) -> Dict[str, Any]:
+    """
+    Parse MLPerf summary file and extract metrics.
+    
+    Returns a dictionary of metric names to values.
+    """
+    metrics = {}
+    
+    if not summary_file or not summary_file.exists():
+        return metrics
+    
+    try:
+        with open(summary_file, 'r', encoding='utf-8', errors='ignore') as f:
+            content = f.read()
+            
+            # Extract key metrics
+            # Samples per second
+            samples_match = re.search(r'Samples per second:\s*([\d.]+)', content)
+            if samples_match:
+                metrics['samples_per_second'] = float(samples_match.group(1))
+            
+            # Tokens per second
+            tokens_match = re.search(r'Tokens per second:\s*([\d.]+)', content)
+            if tokens_match:
+                metrics['tokens_per_second'] = float(tokens_match.group(1))
+            
+            # Latency metrics (convert from nanoseconds to milliseconds)
+            latency_patterns = {
+                'min_latency_ms': r'Min latency \(ns\)\s*:\s*(\d+)',
+                'max_latency_ms': r'Max latency \(ns\)\s*:\s*(\d+)',
+                'mean_latency_ms': r'Mean latency \(ns\)\s*:\s*(\d+)',
+                'p50_latency_ms': r'50\.00 percentile latency \(ns\)\s*:\s*(\d+)',
+                'p90_latency_ms': r'90\.00 percentile latency \(ns\)\s*:\s*(\d+)',
+                'p95_latency_ms': r'95\.00 percentile latency \(ns\)\s*:\s*(\d+)',
+                'p97_latency_ms': r'97\.00 percentile latency \(ns\)\s*:\s*(\d+)',
+                'p99_latency_ms': r'99\.00 percentile latency \(ns\)\s*:\s*(\d+)',
+                'p99_9_latency_ms': r'99\.90 percentile latency \(ns\)\s*:\s*(\d+)',
+            }
+            
+            for metric_name, pattern in latency_patterns.items():
+                match = re.search(pattern, content)
+                if match:
+                    # Convert nanoseconds to milliseconds
+                    ns_value = int(match.group(1))
+                    metrics[metric_name] = ns_value / 1_000_000.0
+            
+            # Test parameters
+            param_patterns = {
+                'samples_per_query': r'samples_per_query\s*:\s*(\d+)',
+                'target_qps': r'target_qps\s*:\s*([\d.]+)',
+                'ttft_latency_ns': r'ttft_latency \(ns\):\s*(\d+)',
+                'tpot_latency_ns': r'tpot_latency \(ns\):\s*(\d+)',
+                'max_async_queries': r'max_async_queries\s*:\s*(\d+)',
+                'min_duration_ms': r'min_duration \(ms\):\s*(\d+)',
+                'max_duration_ms': r'max_duration \(ms\):\s*(\d+)',
+                'min_query_count': r'min_query_count\s*:\s*(\d+)',
+                'max_query_count': r'max_query_count\s*:\s*(\d+)',
+            }
+            
+            for param_name, pattern in param_patterns.items():
+                match = re.search(pattern, content)
+                if match:
+                    value = match.group(1)
+                    # Try to convert to appropriate type
+                    try:
+                        if '.' in value:
+                            metrics[param_name] = float(value)
+                        else:
+                            metrics[param_name] = int(value)
+                    except ValueError:
+                        metrics[param_name] = value
+            
+            # Extract scenario and mode
+            scenario_match = re.search(r'Scenario\s*:\s*(\w+)', content)
+            if scenario_match:
+                metrics['mlperf_scenario'] = scenario_match.group(1)
+            
+            mode_match = re.search(r'Mode\s*:\s*(\w+)', content)
+            if mode_match:
+                metrics['mlperf_mode'] = mode_match.group(1)
+            
+            # Extract result validity
+            result_match = re.search(r'Result is\s*:\s*(\w+)', content)
+            if result_match:
+                metrics['mlperf_result'] = result_match.group(1)
+    
+    except Exception as e:
+        print(f"  ⚠️  Warning: Could not parse MLPerf summary {summary_file.name}: {e}")
+    
+    return metrics
 
 
 def load_config(study_dir: Path) -> Optional[Dict]:
@@ -298,13 +404,28 @@ def upload_scenario_to_mlflow(
         server_log = get_server_log_file(scenario_dir, param_combo_name)
         if server_log:
             print(f"  Server log: {server_log.relative_to(study_dir)}")
-            server_args = parse_vllm_server_args(server_log)
-            if server_args:
-                print(f"  Extracted vLLM args ({len(server_args)}):")
-                for key, value in sorted(list(server_args.items())[:5]):  # Show first 5
-                    print(f"    --{key} = {value}")
-                if len(server_args) > 5:
-                    print(f"    ... and {len(server_args) - 5} more")
+            log_data = parse_vllm_server_log(server_log)
+            if log_data.get('version'):
+                print(f"  vLLM version: {log_data['version']}")
+            if log_data.get('args'):
+                print(f"  Extracted vLLM args ({len(log_data['args'])}):")
+                for key, value in sorted(list(log_data['args'].items())[:5]):  # Show first 5
+                    print(f"    {key} = {value}")
+                if len(log_data['args']) > 5:
+                    print(f"    ... and {len(log_data['args']) - 5} more")
+        
+        # Check for MLPerf summary
+        param_combo_dir = scenario_dir / 'results' / param_combo_name if param_combo_name else None
+        mlperf_summary = find_mlperf_summary_file(scenario_dir, param_combo_dir)
+        if mlperf_summary:
+            print(f"  MLPerf summary: {mlperf_summary.relative_to(study_dir)}")
+            mlperf_metrics = parse_mlperf_summary(mlperf_summary)
+            if mlperf_metrics:
+                print(f"  Extracted MLPerf metrics ({len(mlperf_metrics)}):")
+                for key, value in sorted(list(mlperf_metrics.items())[:5]):  # Show first 5
+                    print(f"    {key} = {value}")
+                if len(mlperf_metrics) > 5:
+                    print(f"    ... and {len(mlperf_metrics) - 5} more")
         
         return None
     
@@ -320,15 +441,21 @@ def upload_scenario_to_mlflow(
             if param_combo_name:
                 mlflow.set_tag("param_combo", param_combo_name)
             
-            # Parse and log vLLM server arguments as tags
+            # Parse and log vLLM server log data
             server_log = get_server_log_file(scenario_dir, param_combo_name)
             if server_log:
-                server_args = parse_vllm_server_args(server_log)
-                if server_args:
-                    for arg_name, arg_value in server_args.items():
+                log_data = parse_vllm_server_log(server_log)
+                
+                # Log API version as tag
+                if log_data.get('version'):
+                    mlflow.set_tag("vllm_version", log_data['version'])
+                
+                # Log non-default arguments as tags
+                if log_data.get('args'):
+                    for arg_name, arg_value in log_data['args'].items():
                         # Log as tag (tags are better for filtering/searching)
                         mlflow.set_tag(f"vllm_arg_{arg_name}", str(arg_value))
-                    print(f"  ✅ Extracted {len(server_args)} vLLM arguments from server log")
+                    print(f"  ✅ Extracted vLLM version {log_data.get('version', 'unknown')} and {len(log_data['args'])} arguments from server log")
             
             # Upload entire scenario directory structure preserving folder hierarchy
             # This will upload logs/, results/, profiles/, and all their contents
@@ -351,8 +478,21 @@ def upload_scenario_to_mlflow(
                         if file_count > 0:
                             print(f"    - {dir_name}/ ({file_count} files)")
             
-            # Also extract and log metrics from JSON result files
+            # Parse and log MLPerf summary metrics
             param_combo_dir = scenario_dir / 'results' / param_combo_name if param_combo_name else None
+            mlperf_summary = find_mlperf_summary_file(scenario_dir, param_combo_dir)
+            if mlperf_summary:
+                mlperf_metrics = parse_mlperf_summary(mlperf_summary)
+                if mlperf_metrics:
+                    for metric_name, metric_value in mlperf_metrics.items():
+                        if isinstance(metric_value, (int, float)):
+                            mlflow.log_metric(metric_name, metric_value)
+                        else:
+                            # Log non-numeric values as parameters
+                            mlflow.log_param(metric_name, str(metric_value))
+                    print(f"  ✅ Extracted and logged {len(mlperf_metrics)} MLPerf metrics")
+            
+            # Also extract and log metrics from JSON result files
             result_files = get_result_files(scenario_dir, param_combo_dir)
             if result_files:
                 for result_file in result_files:
@@ -508,14 +648,20 @@ Examples:
                     mlflow.set_tag("scenario", scenario_name)
                     mlflow.log_param("scenario_dir", str(scenario_dir.relative_to(study_dir)))
                     
-                    # Parse and log vLLM server arguments as tags (for scenario-level)
+                    # Parse and log vLLM server log data (for scenario-level)
                     server_log = get_server_log_file(scenario_dir, None)
                     if server_log:
-                        server_args = parse_vllm_server_args(server_log)
-                        if server_args:
-                            for arg_name, arg_value in server_args.items():
+                        log_data = parse_vllm_server_log(server_log)
+                        
+                        # Log API version as tag
+                        if log_data.get('version'):
+                            mlflow.set_tag("vllm_version", log_data['version'])
+                        
+                        # Log non-default arguments as tags
+                        if log_data.get('args'):
+                            for arg_name, arg_value in log_data['args'].items():
                                 mlflow.set_tag(f"vllm_arg_{arg_name}", str(arg_value))
-                            print(f"  ✅ Extracted {len(server_args)} vLLM arguments from server log")
+                            print(f"  ✅ Extracted vLLM version {log_data.get('version', 'unknown')} and {len(log_data['args'])} arguments from server log")
                     
                     # Detect parameter combinations
                     param_combos = detect_param_combinations(scenario_dir)
@@ -556,6 +702,19 @@ Examples:
                                     if file_count > 0:
                                         print(f"    - {dir_name}/ ({file_count} files)")
                         
+                        # Parse and log MLPerf summary metrics
+                        mlperf_summary = find_mlperf_summary_file(scenario_dir, None)
+                        if mlperf_summary:
+                            mlperf_metrics = parse_mlperf_summary(mlperf_summary)
+                            if mlperf_metrics:
+                                for metric_name, metric_value in mlperf_metrics.items():
+                                    if isinstance(metric_value, (int, float)):
+                                        mlflow.log_metric(metric_name, metric_value)
+                                    else:
+                                        # Log non-numeric values as parameters
+                                        mlflow.log_param(metric_name, str(metric_value))
+                                print(f"  ✅ Extracted and logged {len(mlperf_metrics)} MLPerf metrics")
+                        
                         # Also extract and log metrics from JSON result files
                         result_files = get_result_files(scenario_dir, None)
                         if result_files:
@@ -583,13 +742,27 @@ Examples:
             # Parse and log vLLM server arguments (dry run)
             server_log = get_server_log_file(scenario_dir, None)
             if server_log:
-                server_args = parse_vllm_server_args(server_log)
-                if server_args:
-                    print(f"  Would extract {len(server_args)} vLLM arguments from server log")
-                    for key, value in sorted(list(server_args.items())[:5]):  # Show first 5
-                        print(f"    --{key} = {value}")
-                    if len(server_args) > 5:
-                        print(f"    ... and {len(server_args) - 5} more")
+                log_data = parse_vllm_server_log(server_log)
+                if log_data.get('version'):
+                    print(f"  Would extract vLLM version: {log_data['version']}")
+                if log_data.get('args'):
+                    print(f"  Would extract {len(log_data['args'])} vLLM arguments from server log")
+                    for key, value in sorted(list(log_data['args'].items())[:5]):  # Show first 5
+                        print(f"    {key} = {value}")
+                    if len(log_data['args']) > 5:
+                        print(f"    ... and {len(log_data['args']) - 5} more")
+            
+            # Check for MLPerf summary (dry run)
+            mlperf_summary = find_mlperf_summary_file(scenario_dir, None)
+            if mlperf_summary:
+                print(f"  Would parse MLPerf summary: {mlperf_summary.relative_to(study_dir)}")
+                mlperf_metrics = parse_mlperf_summary(mlperf_summary)
+                if mlperf_metrics:
+                    print(f"  Would extract {len(mlperf_metrics)} MLPerf metrics")
+                    for key, value in sorted(list(mlperf_metrics.items())[:5]):  # Show first 5
+                        print(f"    {key} = {value}")
+                    if len(mlperf_metrics) > 5:
+                        print(f"    ... and {len(mlperf_metrics) - 5} more")
             
             # Detect parameter combinations
             param_combos = detect_param_combinations(scenario_dir)
