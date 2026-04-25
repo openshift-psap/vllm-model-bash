@@ -7,6 +7,7 @@ import argparse
 import csv
 import json
 import os
+import shlex
 import shutil
 import signal
 import subprocess
@@ -65,7 +66,7 @@ class VLLMBenchmark:
         study_name = defaults.get('study_dir', f'Study_{model_name}')
 
         timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-        study_dir = Path(f"{study_name}_{timestamp}")
+        study_dir = Path(f"{study_name}_{timestamp}").resolve()
         study_dir.mkdir(parents=True, exist_ok=True)
 
         print(f"📁 Study directory: {study_dir}")
@@ -138,7 +139,8 @@ class VLLMBenchmark:
         params: List[str],
         log_file: Path,
         nsys_profile: bool = False,
-        nsys_args: str = ""
+        nsys_args: str = "",
+        nsys_output_prefix: Optional[Path] = None
     ) -> tuple[Optional[subprocess.Popen], Optional[str]]:
         """Start vLLM server. Returns (process, nsys_session_id)."""
         model_name = self.config['model']['name']
@@ -148,13 +150,59 @@ class VLLMBenchmark:
 
         if nsys_profile:
             nsys_launch_args = nsys_args or "--trace=cuda,nvtx,osrt"
+            nsys_launch_tokens = shlex.split(nsys_launch_args)
+            output_parent = nsys_output_prefix.parent.resolve() if nsys_output_prefix else self.study_dir
             # Check if using --start-later (session mode)
-            use_session_mode = "--start-later=true" in nsys_launch_args or "--start-later true" in nsys_launch_args
+            use_session_mode = any(
+                token == "--start-later"
+                or token.startswith("--start-later=")
+                for token in nsys_launch_tokens
+            )
 
             if use_session_mode:
                 print("🔧 Using nsys session mode (start-later)")
 
-            cmd = ["nsys", "profile"] + nsys_launch_args.split()
+            has_output_arg = any(
+                token in ("-o", "--output")
+                or token.startswith("--output=")
+                or (token.startswith("-o") and len(token) > 2)
+                for token in nsys_launch_tokens
+            )
+
+            if has_output_arg:
+                # Keep user-provided output name, but anchor relative paths to scenario profiles dir.
+                rewritten_tokens: List[str] = []
+                i = 0
+                while i < len(nsys_launch_tokens):
+                    token = nsys_launch_tokens[i]
+                    if token in ("-o", "--output") and i + 1 < len(nsys_launch_tokens):
+                        output_val = Path(nsys_launch_tokens[i + 1])
+                        if not output_val.is_absolute():
+                            output_val = output_parent / output_val
+                        rewritten_tokens.extend([token, str(output_val.resolve())])
+                        i += 2
+                        continue
+                    if token.startswith("--output="):
+                        output_val = Path(token.split("=", 1)[1])
+                        if not output_val.is_absolute():
+                            output_val = output_parent / output_val
+                        rewritten_tokens.append(f"--output={output_val.resolve()}")
+                        i += 1
+                        continue
+                    if token.startswith("-o") and len(token) > 2:
+                        output_val = Path(token[2:])
+                        if not output_val.is_absolute():
+                            output_val = output_parent / output_val
+                        rewritten_tokens.append(f"-o{output_val.resolve()}")
+                        i += 1
+                        continue
+                    rewritten_tokens.append(token)
+                    i += 1
+                nsys_launch_tokens = rewritten_tokens
+            elif nsys_output_prefix:
+                nsys_launch_tokens.extend(["-o", str(nsys_output_prefix.resolve())])
+
+            cmd = ["nsys", "profile"] + nsys_launch_tokens
 
         cmd += ["vllm", "serve", model_name, "--port", str(port)] + params
 
@@ -314,7 +362,8 @@ class VLLMBenchmark:
         # Start server
         self.server_process, nsys_session_id = self._start_server(
             scenario_name, port, full_params, log_file,
-            nsys_profile=profile_nsys, nsys_args=nsys_launch_args
+            nsys_profile=profile_nsys, nsys_args=nsys_launch_args,
+            nsys_output_prefix=scenario_dir / 'profiles' / 'nsys_server'
         )
 
         if not self.server_process or not self._wait_for_server(port):
@@ -336,7 +385,7 @@ class VLLMBenchmark:
             nsys_stop_timer = None
             nsys_started_event = None
             if profile_nsys:
-                nsys_file = scenario_dir / 'profiles' / f"nsys_conc{concurrency}"
+                nsys_file = (scenario_dir / 'profiles' / f"nsys_conc{concurrency}").resolve()
                 nsys_start_args = scenario.get('profiling', {}).get('nsys_start_args', '--force-overwrite=true')
 
                 def start_nsys_profiling():

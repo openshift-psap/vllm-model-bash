@@ -1,59 +1,139 @@
 # vllm-model-bash
-Scripts for vllm-model-bash efforts 
 
-## Overview
+Scenario-based benchmarking and profiling helpers for vLLM serving workloads.
 
-Each benchmark run:
-1. Launches a vLLM server based on the YAML config
-2. Runs concurrency sweeps and collects latency/throughput metrics
-3. Optionally profiles GPU activity via Nsight Systems (nsys), and/or PyTorch Profiler
-4. Produces organized outputs under a specified directory
+## What This Does
 
-Ideal for performance characterization, MLPerf inference testing, and multi-level GPU profiling at scale.
+For each scenario in a YAML config, `vllm_bench.py`:
 
----
+1. Launches `vllm serve` with scenario-specific parameters.
+2. Runs `vllm bench serve` across one or more concurrency points.
+3. Saves benchmark JSON output and a cross-scenario summary CSV.
+4. Optionally collects:
+   - Nsight Systems (`nsys`) traces
+   - PyTorch Profiler traces
 
-### Installation
+This is useful for repeatable performance studies, regression tracking, and profiling runs.
+
+## Requirements
+
+### Python and Package Dependencies
 
 ```bash
 pip install -r requirements.txt
 ```
 
-### Basic Usage
+### Optional System Tools
 
-**Python script** (recommended for scenario-based configs):
+Install these if you use the legacy shell scripts or profiling workflows:
+
+```bash
+sudo apt-get install -y jq curl
+pip install yq
+```
+
+Profiling tools (optional but recommended for GPU analysis):
+- Nsight Systems (`nsys`)
+- Nsight Compute (`ncu`)
+- PyTorch Profiler (enabled through scenario config)
+
+## Recommended Workflow (`vllm_bench.py`)
+
+### CLI Syntax
+
+```bash
+python vllm_bench.py <config.yaml> [--scenario name1,name2] [--delay SEC] [--duration SEC]
+```
+
+### Common Commands
+
 ```bash
 # Run all scenarios
 python vllm_bench.py configs/models/gpt-oss-20b.yaml
 
-# Run specific scenario(s)
+# Run a single scenario
 python vllm_bench.py configs/models/gpt-oss-20b.yaml --scenario baseline
+
+# Run multiple scenarios
 python vllm_bench.py configs/models/gpt-oss-20b.yaml --scenarios baseline,async_scheduling
+
+# Start nsys after benchmark has already started
+python vllm_bench.py configs/models/gpt-oss-20b.yaml --scenario baseline --delay 15
+
+# Collect nsys for fixed duration (seconds)
+python vllm_bench.py configs/models/gpt-oss-20b.yaml --scenario baseline --duration 30
 ```
 
-**Bash script** (legacy support):
+### Argument Details
+
+- `config`: YAML file with model/defaults/scenarios.
+- `--scenario` / `--scenarios`: comma-separated scenario names to run.
+- `--delay`: delay before `nsys start` (useful with warmup-heavy startup).
+- `--duration`: stop nsys after fixed time instead of end-of-benchmark.
+
+## Config Shape
+
+At minimum, your config should contain:
+
+```yaml
+model:
+  name: meta-llama/Llama-3.1-8B-Instruct
+  base_params: "--gpu-memory-utilization 0.9"
+
+defaults:
+  study_dir: Study_llama
+  env:
+    VLLM_USE_V1: "1"
+  bench:
+    concurrencies: [1, 8, 32]
+    input_len: 1024
+    output_len: 128
+    cc_mult: 10
+
+scenarios:
+  - name: baseline
+    port: 8000
+    params: "--max-model-len 8192"
+    bench:
+      concurrencies: [1, 16, 64]
+    profile: true
+    profiling:
+      nsys_launch_args: "--trace=cuda,nvtx,osrt --start-later=true"
+      nsys_start_args: "--force-overwrite=true --gpu-metrics-devices=cuda-visible"
+      torch_profiler:
+        enabled: true
+```
+
+## Output Layout
+
+Each run creates a timestamped study directory:
+
+```text
+<study_dir>_<timestamp>/
+  config.yaml
+  summary.csv
+  scenario_<name>/
+    logs/
+      vllm_server.log
+    results/
+      <result_prefix>.json
+    profiles/
+      nsys_server.qdrep|.nsys-rep      # when using direct `nsys profile` mode
+      nsys_conc<k>.qdrep|.nsys-rep     # when using start/stop session mode
+      torch/
+        trace_conc<k>*
+```
+
+Notes:
+- `summary.csv` aggregates every scenario/concurrency run.
+- Nsight output now writes under each scenario `profiles/` directory.
+- Exact Nsight extension varies by nsys version (`.qdrep` and/or `.nsys-rep`).
+
+## Legacy Script
+
+`vllm_bench.sh` remains available for older workflows/configs:
+
 ```bash
-# Works with both old and new config formats
 bash vllm_bench.sh config.yaml
 bash vllm_bench.sh configs/models/gpt-oss-20b.yaml --scenario baseline
 ```
-
-## ⚙️ Requirements
-
-### Dependencies
-
-Install these packages:
-
-```bash
-sudo apt-get install jq curl -y
-pip install yq
-```
-
-### Profiling Tools (Optional)
-
-For GPU profiling capabilities:
-- **Nsight Systems**: System-wide performance analysis, CUDA graph tracing
-- **Nsight Compute**: Detailed kernel-level analysis
-- **PyTorch Profiler**: Python/PyTorch-level CPU and GPU profiling with memory tracking
-
----
