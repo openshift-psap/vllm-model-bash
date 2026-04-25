@@ -22,17 +22,152 @@ import requests
 import yaml
 
 
+class TeeStream:
+    """Mirror writes to terminal and a log file."""
+
+    def __init__(self, *streams):
+        self.streams = streams
+
+    def write(self, data: str):
+        for stream in self.streams:
+            stream.write(data)
+        return len(data)
+
+    def flush(self):
+        for stream in self.streams:
+            stream.flush()
+
+
 class VLLMBenchmark:
     def __init__(self, config_path: str, scenario_filter: Optional[List[str]] = None,
-                 nsys_delay: Optional[float] = None, nsys_duration: Optional[float] = None):
+                 nsys_delay: Optional[float] = None, nsys_duration: Optional[float] = None,
+                 enable_mlflow: bool = True, mlflow_experiment: Optional[str] = None,
+                 mlflow_run_name: Optional[str] = None, mlflow_tracking_uri: Optional[str] = None,
+                 mlflow_tags: Optional[Dict[str, str]] = None,
+                 cli_command: Optional[List[str]] = None):
         self.config_path = Path(config_path)
         self.scenario_filter = scenario_filter
         self.nsys_delay = nsys_delay
         self.nsys_duration = nsys_duration
+        self.enable_mlflow = enable_mlflow
+        self.mlflow_experiment = mlflow_experiment
+        self.mlflow_run_name = mlflow_run_name
+        self.mlflow_tracking_uri = mlflow_tracking_uri
+        self.mlflow_tags = mlflow_tags or {}
+        self.cli_command = cli_command or sys.argv[:]
         self.config = self._load_config()
         self.study_dir = self._setup_study_dir()
         self.summary_data = []
         self.server_process = None
+        self._log_file_handle = None
+        self._stdout_original = None
+        self._stderr_original = None
+        self.run_log_path = self.study_dir / "logs" / "benchmark_output.log"
+        self.command_file_path = self.study_dir / "metadata" / "command.txt"
+        self.nvidia_smi_file_path = self.study_dir / "metadata" / "nvidia-smi.txt"
+        self.lscpu_file_path = self.study_dir / "metadata" / "lscpu.txt"
+
+    def _setup_run_logging(self):
+        """Capture console output to a run log while preserving terminal output."""
+        self.run_log_path.parent.mkdir(parents=True, exist_ok=True)
+        self._stdout_original = sys.stdout
+        self._stderr_original = sys.stderr
+        self._log_file_handle = open(self.run_log_path, "a", buffering=1)
+        sys.stdout = TeeStream(self._stdout_original, self._log_file_handle)
+        sys.stderr = TeeStream(self._stderr_original, self._log_file_handle)
+
+    def _teardown_run_logging(self):
+        """Restore stdout/stderr and close run log."""
+        if self._stdout_original is not None:
+            sys.stdout = self._stdout_original
+        if self._stderr_original is not None:
+            sys.stderr = self._stderr_original
+        if self._log_file_handle:
+            self._log_file_handle.close()
+            self._log_file_handle = None
+
+    def _capture_command_and_system_info(self):
+        """Capture command line and machine information into study metadata."""
+        metadata_dir = self.study_dir / "metadata"
+        metadata_dir.mkdir(parents=True, exist_ok=True)
+
+        command_contents = [
+            f"timestamp={datetime.now().isoformat()}",
+            f"cwd={Path.cwd()}",
+            f"python={sys.executable}",
+            f"argv={shlex.join(self.cli_command)}",
+        ]
+        self.command_file_path.write_text("\n".join(command_contents) + "\n")
+
+        for cmd, output_file in (
+            (["nvidia-smi"], self.nvidia_smi_file_path),
+            (["lscpu"], self.lscpu_file_path),
+        ):
+            try:
+                result = subprocess.run(
+                    cmd,
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                    timeout=30
+                )
+                output = (
+                    f"$ {' '.join(cmd)}\n"
+                    f"exit_code={result.returncode}\n\n"
+                    f"{result.stdout}"
+                )
+                if result.stderr:
+                    output += f"\n[stderr]\n{result.stderr}"
+            except FileNotFoundError:
+                output = f"$ {' '.join(cmd)}\ncommand not found on this system\n"
+            except Exception as exc:
+                output = f"$ {' '.join(cmd)}\nfailed to collect output: {exc}\n"
+
+            output_file.write_text(output)
+
+    def _log_mlflow_artifacts(self):
+        """Upload run artifacts to MLflow."""
+        if not self.enable_mlflow:
+            print("ℹ️  MLflow upload disabled")
+            return
+
+        try:
+            import mlflow  # type: ignore
+        except ImportError:
+            print("⚠️  MLflow not installed. Skipping MLflow upload.")
+            return
+
+        if self.mlflow_tracking_uri:
+            mlflow.set_tracking_uri(self.mlflow_tracking_uri)
+        if self.mlflow_experiment:
+            mlflow.set_experiment(self.mlflow_experiment)
+
+        run_name = self.mlflow_run_name or self.study_dir.name
+        print(f"📤 Uploading artifacts to MLflow (run: {run_name})")
+
+        with mlflow.start_run(run_name=run_name):
+            if self.mlflow_tags:
+                mlflow.set_tags(self.mlflow_tags)
+            mlflow.log_param("model_name", self.config["model"]["name"])
+            mlflow.log_param("config_path", str(self.config_path.resolve()))
+            mlflow.log_param("study_dir", str(self.study_dir))
+            mlflow.log_param("scenario_count", len(self.config["scenarios"]))
+            if self.scenario_filter:
+                mlflow.log_param("scenario_filter", ",".join(self.scenario_filter))
+            if self.nsys_delay is not None:
+                mlflow.log_param("nsys_delay_sec", self.nsys_delay)
+            if self.nsys_duration is not None:
+                mlflow.log_param("nsys_duration_sec", self.nsys_duration)
+
+            # Requested uploads
+            mlflow.log_artifacts(str(self.study_dir), artifact_path="study_dir")
+            mlflow.log_artifact(str(self.nvidia_smi_file_path), artifact_path="system")
+            mlflow.log_artifact(str(self.lscpu_file_path), artifact_path="system")
+            mlflow.log_artifact(str(self.command_file_path), artifact_path="metadata")
+            mlflow.log_artifact(str(self.study_dir / "config.yaml"), artifact_path="metadata")
+            mlflow.log_artifact(str(self.run_log_path), artifact_path="logs")
+
+        print("✅ MLflow upload complete")
 
     def _load_config(self) -> Dict[str, Any]:
         """Load and validate scenario-based config."""
@@ -250,6 +385,23 @@ class VLLMBenchmark:
 
         time.sleep(2)
 
+    def _run_command_logged(self, cmd: List[str], check: bool = False) -> int:
+        """Run command and stream both stdout/stderr through benchmark logger."""
+        process = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1
+        )
+        assert process.stdout is not None
+        for line in process.stdout:
+            print(line, end="")
+        return_code = process.wait()
+        if check and return_code != 0:
+            raise subprocess.CalledProcessError(return_code, cmd)
+        return return_code
+
     def _run_benchmark(
         self,
         scenario_name: str,
@@ -286,7 +438,7 @@ class VLLMBenchmark:
 
         start_time = time.time()
         try:
-            subprocess.run(cmd, check=True, capture_output=False)
+            self._run_command_logged(cmd, check=True)
             status = "success"
         except subprocess.CalledProcessError:
             status = "failed"
@@ -395,11 +547,13 @@ class VLLMBenchmark:
                         print(f"🎥 nsys start --session={nsys_session_id} → {nsys_file}.qdrep")
                         cmd = ['nsys', 'start', f'--session={nsys_session_id}']
                         cmd += nsys_start_args.split() + ['--output', str(nsys_file)]
-                        subprocess.run(cmd)
+                        self._run_command_logged(cmd)
                     else:
                         # Legacy mode (no session)
                         print(f"🎥 nsys start → {nsys_file}.qdrep")
-                        subprocess.run(['nsys', 'start'] + nsys_start_args.split() + ['--output', str(nsys_file)])
+                        self._run_command_logged(
+                            ['nsys', 'start'] + nsys_start_args.split() + ['--output', str(nsys_file)]
+                        )
 
                     # Mark that nsys has started
                     if nsys_started_event:
@@ -412,10 +566,10 @@ class VLLMBenchmark:
                         def stop_nsys_after_duration():
                             if nsys_session_id:
                                 print(f"\n⏰ Duration expired - stopping nsys (session={nsys_session_id})")
-                                subprocess.run(['nsys', 'stop', f'--session={nsys_session_id}'])
+                                self._run_command_logged(['nsys', 'stop', f'--session={nsys_session_id}'])
                             else:
                                 print("\n⏰ Duration expired - stopping nsys")
-                                subprocess.run(['nsys', 'stop'])
+                                self._run_command_logged(['nsys', 'stop'])
                             print(f"✅ Saved: {nsys_file}.qdrep")
 
                         timer = threading.Timer(self.nsys_duration, stop_nsys_after_duration)
@@ -461,10 +615,10 @@ class VLLMBenchmark:
 
                     if nsys_session_id:
                         print(f"🛑 nsys stop --session={nsys_session_id}")
-                        subprocess.run(['nsys', 'stop', f'--session={nsys_session_id}'])
+                        self._run_command_logged(['nsys', 'stop', f'--session={nsys_session_id}'])
                     else:
                         print("🛑 nsys stop")
-                        subprocess.run(['nsys', 'stop'])
+                        self._run_command_logged(['nsys', 'stop'])
                     print(f"✅ Saved: {nsys_file}.qdrep")
 
             # Report torch profiler output
@@ -490,25 +644,28 @@ class VLLMBenchmark:
 
     def run(self):
         """Run all scenarios."""
-        print("🚀 vLLM Scenario Benchmark")
-        print(f"🎯 Model: {self.config['model']['name']}")
-        print(f"📊 Scenarios: {len(self.config['scenarios'])}")
-
-        # Apply global environment variables
-        env_defaults = self.config.get('defaults', {}).get('env', {})
-        self._apply_env_vars(env_defaults)
-
-        # Setup summary file
-        summary_file = self.study_dir / 'summary.csv'
-        with open(summary_file, 'w', newline='') as f:
-            writer = csv.DictWriter(f, fieldnames=[
-                'scenario', 'port', 'concurrency', 'num_prompts',
-                'status', 'runtime_sec', 'result_file'
-            ])
-            writer.writeheader()
-
-        # Run each scenario
         try:
+            self._setup_run_logging()
+            self._capture_command_and_system_info()
+
+            print("🚀 vLLM Scenario Benchmark")
+            print(f"🎯 Model: {self.config['model']['name']}")
+            print(f"📊 Scenarios: {len(self.config['scenarios'])}")
+
+            # Apply global environment variables
+            env_defaults = self.config.get('defaults', {}).get('env', {})
+            self._apply_env_vars(env_defaults)
+
+            # Setup summary file
+            summary_file = self.study_dir / 'summary.csv'
+            with open(summary_file, 'w', newline='') as f:
+                writer = csv.DictWriter(f, fieldnames=[
+                    'scenario', 'port', 'concurrency', 'num_prompts',
+                    'status', 'runtime_sec', 'result_file'
+                ])
+                writer.writeheader()
+
+            # Run each scenario
             for scenario in self.config['scenarios']:
                 self._run_scenario(scenario)
         except KeyboardInterrupt:
@@ -520,20 +677,38 @@ class VLLMBenchmark:
             if self.server_process:
                 self._stop_server(self.server_process)
             raise
-
-        # Write summary
-        with open(summary_file, 'w', newline='') as f:
-            writer = csv.DictWriter(f, fieldnames=self.summary_data[0].keys())
-            writer.writeheader()
-            writer.writerows(self.summary_data)
+        finally:
+            try:
+                summary_file = self.study_dir / 'summary.csv'
+                if self.summary_data:
+                    with open(summary_file, 'w', newline='') as f:
+                        writer = csv.DictWriter(f, fieldnames=self.summary_data[0].keys())
+                        writer.writeheader()
+                        writer.writerows(self.summary_data)
+                self._log_mlflow_artifacts()
+            finally:
+                self._teardown_run_logging()
 
         print("\n" + "=" * 50)
         print("🎉 All scenarios completed!")
-        print(f"📊 Summary: {summary_file}")
+        print(f"📊 Summary: {self.study_dir / 'summary.csv'}")
         print(f"📁 Study directory: {self.study_dir}")
 
 
 def main():
+    def parse_mlflow_tags(raw_tags: Optional[List[str]]) -> Dict[str, str]:
+        """Parse repeated KEY=VALUE arguments into a dict."""
+        parsed: Dict[str, str] = {}
+        for raw in raw_tags or []:
+            if "=" not in raw:
+                raise ValueError(f"Invalid MLflow tag '{raw}'. Expected KEY=VALUE format.")
+            key, value = raw.split("=", 1)
+            key = key.strip()
+            if not key:
+                raise ValueError(f"Invalid MLflow tag '{raw}'. Tag key cannot be empty.")
+            parsed[key] = value
+        return parsed
+
     parser = argparse.ArgumentParser(
         description="vLLM scenario-based benchmark tool",
         formatter_class=argparse.RawDescriptionHelpFormatter
@@ -554,6 +729,30 @@ def main():
         type=float,
         help='Duration (in seconds) for nsys profiling. If specified, nsys will stop after this duration instead of at benchmark completion'
     )
+    parser.add_argument(
+        '--no-mlflow',
+        action='store_true',
+        help='Disable MLflow artifact upload at the end of the run'
+    )
+    parser.add_argument(
+        '--mlflow-experiment',
+        help='MLflow experiment name'
+    )
+    parser.add_argument(
+        '--mlflow-run-name',
+        help='MLflow run name (defaults to study directory name)'
+    )
+    parser.add_argument(
+        '--mlflow-tracking-uri',
+        help='MLflow tracking URI (optional)'
+    )
+    parser.add_argument(
+        '--mlflow-tag',
+        action='append',
+        dest='mlflow_tags',
+        default=[],
+        help='MLflow tag in KEY=VALUE format. Repeat for multiple tags.'
+    )
 
     args = parser.parse_args()
 
@@ -562,11 +761,22 @@ def main():
         scenario_filter = [s.strip() for s in args.scenarios.split(',')]
 
     try:
+        mlflow_tags = parse_mlflow_tags(args.mlflow_tags)
+    except ValueError as e:
+        parser.error(str(e))
+
+    try:
         benchmark = VLLMBenchmark(
             args.config,
             scenario_filter,
             nsys_delay=args.delay,
-            nsys_duration=args.duration
+            nsys_duration=args.duration,
+            enable_mlflow=not args.no_mlflow,
+            mlflow_experiment=args.mlflow_experiment,
+            mlflow_run_name=args.mlflow_run_name,
+            mlflow_tracking_uri=args.mlflow_tracking_uri,
+            mlflow_tags=mlflow_tags,
+            cli_command=sys.argv
         )
         benchmark.run()
     except Exception as e:

@@ -42,7 +42,7 @@ Profiling tools (optional but recommended for GPU analysis):
 ### CLI Syntax
 
 ```bash
-python vllm_bench.py <config.yaml> [--scenario name1,name2] [--delay SEC] [--duration SEC]
+python vllm_bench.py <config.yaml> [--scenario name1,name2] [--delay SEC] [--duration SEC] [--mlflow-experiment NAME] [--mlflow-run-name NAME] [--mlflow-tracking-uri URI] [--mlflow-tag KEY=VALUE]
 ```
 
 ### Common Commands
@@ -62,6 +62,15 @@ python vllm_bench.py configs/models/gpt-oss-20b.yaml --scenario baseline --delay
 
 # Collect nsys for fixed duration (seconds)
 python vllm_bench.py configs/models/gpt-oss-20b.yaml --scenario baseline --duration 30
+
+# Upload artifacts to a specific MLflow experiment
+python vllm_bench.py configs/models/gpt-oss-20b.yaml --mlflow-experiment vllm-bench --mlflow-run-name gptoss20b-baseline
+
+# Add MLflow tags (repeat --mlflow-tag for multiple)
+python vllm_bench.py configs/models/gpt-oss-20b.yaml --mlflow-tag team=perf --mlflow-tag model_family=gptoss
+
+# Disable MLflow uploads
+python vllm_bench.py configs/models/gpt-oss-20b.yaml --no-mlflow
 ```
 
 ### Argument Details
@@ -70,6 +79,11 @@ python vllm_bench.py configs/models/gpt-oss-20b.yaml --scenario baseline --durat
 - `--scenario` / `--scenarios`: comma-separated scenario names to run.
 - `--delay`: delay before `nsys start` (useful with warmup-heavy startup).
 - `--duration`: stop nsys after fixed time instead of end-of-benchmark.
+- `--mlflow-experiment`: MLflow experiment name.
+- `--mlflow-run-name`: MLflow run name override.
+- `--mlflow-tracking-uri`: custom MLflow tracking URI.
+- `--mlflow-tag`: MLflow tag as `KEY=VALUE` (repeatable).
+- `--no-mlflow`: skip MLflow upload.
 
 ## Config Shape
 
@@ -128,6 +142,8 @@ Notes:
 - `summary.csv` aggregates every scenario/concurrency run.
 - Nsight output now writes under each scenario `profiles/` directory.
 - Exact Nsight extension varies by nsys version (`.qdrep` and/or `.nsys-rep`).
+- Run output is captured in `logs/benchmark_output.log`.
+- MLflow upload includes the full study directory, `nvidia-smi`, `lscpu`, command metadata, config, and run log.
 
 ## Legacy Script
 
