@@ -59,22 +59,25 @@ class VLLMBenchmark:
         self.study_dir = self._setup_study_dir()
         self.summary_data = []
         self.server_process = None
-        self._log_file_handle = None
+        self._stdout_log_handle = None
+        self._stderr_log_handle = None
         self._stdout_original = None
         self._stderr_original = None
         self.run_log_path = self.study_dir / "logs" / "benchmark_output.log"
+        self.stderr_log_path = self.study_dir / "logs" / "benchmark_stderr.log"
         self.command_file_path = self.study_dir / "metadata" / "command.txt"
         self.nvidia_smi_file_path = self.study_dir / "metadata" / "nvidia-smi.txt"
         self.lscpu_file_path = self.study_dir / "metadata" / "lscpu.txt"
 
     def _setup_run_logging(self):
-        """Capture console output to a run log while preserving terminal output."""
+        """Capture stdout to run log; route stderr to dedicated file."""
         self.run_log_path.parent.mkdir(parents=True, exist_ok=True)
         self._stdout_original = sys.stdout
         self._stderr_original = sys.stderr
-        self._log_file_handle = open(self.run_log_path, "a", buffering=1)
-        sys.stdout = TeeStream(self._stdout_original, self._log_file_handle)
-        sys.stderr = TeeStream(self._stderr_original, self._log_file_handle)
+        self._stdout_log_handle = open(self.run_log_path, "a", buffering=1)
+        self._stderr_log_handle = open(self.stderr_log_path, "a", buffering=1)
+        sys.stdout = TeeStream(self._stdout_original, self._stdout_log_handle)
+        sys.stderr = self._stderr_log_handle
 
     def _teardown_run_logging(self):
         """Restore stdout/stderr and close run log."""
@@ -82,9 +85,12 @@ class VLLMBenchmark:
             sys.stdout = self._stdout_original
         if self._stderr_original is not None:
             sys.stderr = self._stderr_original
-        if self._log_file_handle:
-            self._log_file_handle.close()
-            self._log_file_handle = None
+        if hasattr(self, "_stdout_log_handle") and self._stdout_log_handle:
+            self._stdout_log_handle.close()
+            self._stdout_log_handle = None
+        if hasattr(self, "_stderr_log_handle") and self._stderr_log_handle:
+            self._stderr_log_handle.close()
+            self._stderr_log_handle = None
 
     def _capture_command_and_system_info(self):
         """Capture command line and machine information into study metadata."""
@@ -166,6 +172,7 @@ class VLLMBenchmark:
             mlflow.log_artifact(str(self.command_file_path), artifact_path="metadata")
             mlflow.log_artifact(str(self.study_dir / "config.yaml"), artifact_path="metadata")
             mlflow.log_artifact(str(self.run_log_path), artifact_path="logs")
+            mlflow.log_artifact(str(self.stderr_log_path), artifact_path="logs")
 
         print("✅ MLflow upload complete")
 
@@ -344,13 +351,20 @@ class VLLMBenchmark:
         print(f"▶️  Starting server: {' '.join(cmd[:5])}...")
 
         log_file.parent.mkdir(parents=True, exist_ok=True)
-        with open(log_file, 'w') as f:
-            process = subprocess.Popen(
-                cmd,
-                stdout=f,
-                stderr=subprocess.STDOUT,
-                preexec_fn=os.setsid
-            )
+        process = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1,
+            preexec_fn=os.setsid
+        )
+        relay_thread = threading.Thread(
+            target=self._relay_process_output_to_logs,
+            args=(process, log_file),
+            daemon=True
+        )
+        relay_thread.start()
 
         print(f"🔑 PID: {process.pid}")
 
@@ -385,18 +399,63 @@ class VLLMBenchmark:
 
         time.sleep(2)
 
-    def _run_command_logged(self, cmd: List[str], check: bool = False) -> int:
-        """Run command and stream both stdout/stderr through benchmark logger."""
+    def _relay_process_output_to_logs(self, process: subprocess.Popen, log_file: Path):
+        """Write long-running process output only to scenario log file."""
+        if process.stdout is None:
+            return
+
+        with open(log_file, "a", buffering=1) as file_stream:
+            for line in process.stdout:
+                file_stream.write(line)
+
+    def _run_command_logged(
+        self,
+        cmd: List[str],
+        check: bool = False,
+        output_file: Optional[Path] = None,
+        echo_to_stdout: bool = True,
+        echo_to_stderr: bool = True
+    ) -> int:
+        """Run command and route stdout/stderr independently."""
         process = subprocess.Popen(
             cmd,
             stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
+            stderr=subprocess.PIPE,
             text=True,
             bufsize=1
         )
         assert process.stdout is not None
-        for line in process.stdout:
-            print(line, end="")
+        assert process.stderr is not None
+        output_handle = None
+        try:
+            if output_file:
+                output_file.parent.mkdir(parents=True, exist_ok=True)
+                output_handle = open(output_file, "a", buffering=1)
+
+            def stream_stdout():
+                for line in process.stdout:
+                    if output_handle:
+                        output_handle.write(line)
+                    if echo_to_stdout:
+                        print(line, end="")
+
+            def stream_stderr():
+                for line in process.stderr:
+                    if output_handle:
+                        output_handle.write(line)
+                    if echo_to_stderr:
+                        print(line, end="", file=sys.stderr)
+
+            stdout_thread = threading.Thread(target=stream_stdout, daemon=True)
+            stderr_thread = threading.Thread(target=stream_stderr, daemon=True)
+            stdout_thread.start()
+            stderr_thread.start()
+            stdout_thread.join()
+            stderr_thread.join()
+        finally:
+            if output_handle:
+                output_handle.close()
+
         return_code = process.wait()
         if check and return_code != 0:
             raise subprocess.CalledProcessError(return_code, cmd)
@@ -411,6 +470,7 @@ class VLLMBenchmark:
         input_len: int,
         output_len: int,
         result_file: Path,
+        bench_log_file: Path,
         enable_profiling: bool = False
     ) -> tuple[str, int]:
         """Run vLLM benchmark."""
@@ -435,15 +495,24 @@ class VLLMBenchmark:
             cmd.append("--profile")
 
         print(f"===== Concurrency: {concurrency} ({num_prompts} prompts) =====")
+        print(f"📝 vllm bench log: {bench_log_file}")
+        print(f"▶ Running vllm bench at concurrency={concurrency}")
 
         start_time = time.time()
         try:
-            self._run_command_logged(cmd, check=True)
+            self._run_command_logged(
+                cmd,
+                check=True,
+                output_file=bench_log_file,
+                echo_to_stdout=False,
+                echo_to_stderr=False
+            )
             status = "success"
         except subprocess.CalledProcessError:
             status = "failed"
 
         runtime = int(time.time() - start_time)
+        print(f"✅ Concurrency {concurrency} complete: {status} ({runtime}s)")
         return status, runtime
 
     def _run_scenario(self, scenario: Dict):
@@ -527,6 +596,7 @@ class VLLMBenchmark:
         # Run benchmarks for each concurrency
         for concurrency in concurrencies:
             num_prompts = concurrency * cc_mult
+            bench_log_file = scenario_dir / "logs" / f"vllm_bench_conc{concurrency}.log"
 
             # Update torch profiler prefix for this concurrency
             if torch_enabled:
@@ -536,12 +606,15 @@ class VLLMBenchmark:
             nsys_file = None
             nsys_stop_timer = None
             nsys_started_event = None
+            nsys_stopped_event = None
             if profile_nsys:
                 nsys_file = (scenario_dir / 'profiles' / f"nsys_conc{concurrency}").resolve()
                 nsys_start_args = scenario.get('profiling', {}).get('nsys_start_args', '--force-overwrite=true')
+                nsys_stopped_event = threading.Event()
 
                 def start_nsys_profiling():
                     """Start nsys profiling and optional duration timer."""
+                    nonlocal nsys_stop_timer
                     if nsys_session_id:
                         # Session-based profiling
                         print(f"🎥 nsys start --session={nsys_session_id} → {nsys_file}.qdrep")
@@ -571,9 +644,11 @@ class VLLMBenchmark:
                                 print("\n⏰ Duration expired - stopping nsys")
                                 self._run_command_logged(['nsys', 'stop'])
                             print(f"✅ Saved: {nsys_file}.qdrep")
+                            if nsys_stopped_event:
+                                nsys_stopped_event.set()
 
-                        timer = threading.Timer(self.nsys_duration, stop_nsys_after_duration)
-                        timer.start()
+                        nsys_stop_timer = threading.Timer(self.nsys_duration, stop_nsys_after_duration)
+                        nsys_stop_timer.start()
 
                 if self.nsys_delay:
                     # Start nsys in background after delay, benchmark continues immediately
@@ -593,7 +668,7 @@ class VLLMBenchmark:
             # Run benchmark (starts immediately, concurrent with delayed nsys start if applicable)
             status, runtime = self._run_benchmark(
                 scenario_name, port, concurrency, num_prompts,
-                input_len, output_len, result_file,
+                input_len, output_len, result_file, bench_log_file,
                 enable_profiling=torch_enabled
             )
 
@@ -605,7 +680,11 @@ class VLLMBenchmark:
                     if nsys_started_event and not nsys_started_event.is_set():
                         print(f"⏱️  Waiting for delayed nsys to start before duration timer kicks in...")
                         nsys_started_event.wait()
-                    print(f"⏱️  Benchmark completed. Nsys will be stopped by duration timer.")
+                    print(f"⏱️  Benchmark completed. Waiting for duration-based nsys stop before next concurrency.")
+                    if nsys_stop_timer and nsys_stopped_event:
+                        wait_timeout = max(self.nsys_duration + 60, 120)
+                        if not nsys_stopped_event.wait(timeout=wait_timeout):
+                            print("⚠️  Timed out waiting for nsys duration stop; continuing.")
                 else:
                     # Manual stop after benchmark completion (original behavior)
                     # Wait for nsys to start if delay was specified

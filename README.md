@@ -153,3 +153,7 @@ Notes:
 bash vllm_bench.sh config.yaml
 bash vllm_bench.sh configs/models/gpt-oss-20b.yaml --scenario baseline
 ```
+
+## Developer Notes
+
+For code flow and debugging notes, see `CODE_README.md`.
