@@ -68,6 +68,15 @@ class VLLMBenchmark:
         self.command_file_path = self.study_dir / "metadata" / "command.txt"
         self.nvidia_smi_file_path = self.study_dir / "metadata" / "nvidia-smi.txt"
         self.lscpu_file_path = self.study_dir / "metadata" / "lscpu.txt"
+        self.nsys_version_file_path = self.study_dir / "metadata" / "nsys_version.txt"
+        self.git_version_file_path = self.study_dir / "metadata" / "git_version.txt"
+        self.git_diff_file_path = self.study_dir / "metadata" / "git_diff.patch"
+        self.os_release_file_path = self.study_dir / "metadata" / "os-release.txt"
+
+    @staticmethod
+    def _sanitize_name(name: str) -> str:
+        """Return filesystem-safe scenario identifier."""
+        return "".join(ch if ch.isalnum() or ch in "-_." else "_" for ch in name)
 
     def _setup_run_logging(self):
         """Capture stdout to run log; route stderr to dedicated file."""
@@ -108,6 +117,7 @@ class VLLMBenchmark:
         for cmd, output_file in (
             (["nvidia-smi"], self.nvidia_smi_file_path),
             (["lscpu"], self.lscpu_file_path),
+            (["nsys", "--version"], self.nsys_version_file_path),
         ):
             try:
                 result = subprocess.run(
@@ -130,6 +140,75 @@ class VLLMBenchmark:
                 output = f"$ {' '.join(cmd)}\nfailed to collect output: {exc}\n"
 
             output_file.write_text(output)
+
+        # Capture git revision metadata and diffs for reproducibility.
+        try:
+            git_version = subprocess.run(
+                ["git", "rev-parse", "HEAD"],
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=10
+            )
+            git_describe = subprocess.run(
+                ["git", "describe", "--always", "--dirty", "--tags"],
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=10
+            )
+            git_version_contents = (
+                "$ git rev-parse HEAD\n"
+                f"exit_code={git_version.returncode}\n"
+                f"{git_version.stdout}\n"
+                "$ git describe --always --dirty --tags\n"
+                f"exit_code={git_describe.returncode}\n"
+                f"{git_describe.stdout}\n"
+            )
+            if git_version.stderr:
+                git_version_contents += f"\n[rev-parse stderr]\n{git_version.stderr}"
+            if git_describe.stderr:
+                git_version_contents += f"\n[describe stderr]\n{git_describe.stderr}"
+            self.git_version_file_path.write_text(git_version_contents)
+        except Exception as exc:
+            self.git_version_file_path.write_text(f"Failed to capture git version: {exc}\n")
+
+        try:
+            git_diff = subprocess.run(
+                ["git", "diff", "--no-color"],
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=20
+            )
+            git_diff_cached = subprocess.run(
+                ["git", "diff", "--no-color", "--cached"],
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=20
+            )
+            git_diff_contents = (
+                "$ git diff --no-color\n"
+                f"exit_code={git_diff.returncode}\n\n"
+                f"{git_diff.stdout}\n"
+                "$ git diff --no-color --cached\n"
+                f"exit_code={git_diff_cached.returncode}\n\n"
+                f"{git_diff_cached.stdout}\n"
+            )
+            if git_diff.stderr:
+                git_diff_contents += f"\n[diff stderr]\n{git_diff.stderr}"
+            if git_diff_cached.stderr:
+                git_diff_contents += f"\n[cached diff stderr]\n{git_diff_cached.stderr}"
+            self.git_diff_file_path.write_text(git_diff_contents)
+        except Exception as exc:
+            self.git_diff_file_path.write_text(f"Failed to capture git diff: {exc}\n")
+
+        # Store /etc/os-release snapshot for OS provenance.
+        try:
+            self.os_release_file_path.write_text(Path("/etc/os-release").read_text())
+        except Exception as exc:
+            self.os_release_file_path.write_text(f"Failed to read /etc/os-release: {exc}\n")
 
     def _log_mlflow_artifacts(self):
         """Upload run artifacts to MLflow."""
@@ -518,6 +597,7 @@ class VLLMBenchmark:
     def _run_scenario(self, scenario: Dict):
         """Run a single scenario."""
         scenario_name = scenario['name']
+        scenario_slug = self._sanitize_name(scenario_name)
         print("\n" + "=" * 50)
         print(f"📋 Scenario: {scenario_name}")
         print("=" * 50)
@@ -529,7 +609,7 @@ class VLLMBenchmark:
         (scenario_dir / 'results').mkdir(exist_ok=True)
         (scenario_dir / 'profiles').mkdir(exist_ok=True)
 
-        log_file = scenario_dir / 'logs' / 'vllm_server.log'
+        log_file = scenario_dir / 'logs' / f'vllm_server_{scenario_slug}.log'
 
         # Merge parameters
         base_params = self.config['model'].get('base_params', '')
@@ -553,6 +633,8 @@ class VLLMBenchmark:
         bench_config = {**bench_defaults, **scenario.get('bench', {})}
 
         concurrencies = bench_config.get('concurrencies', [1, 32, 128])
+        if not concurrencies:
+            raise ValueError(f"Scenario '{scenario_name}' has empty concurrencies list")
         input_len = bench_config.get('input_len', 2000)
         output_len = bench_config.get('output_len', 200)
         cc_mult = bench_config.get('cc_mult', 10)
@@ -584,7 +666,7 @@ class VLLMBenchmark:
         self.server_process, nsys_session_id = self._start_server(
             scenario_name, port, full_params, log_file,
             nsys_profile=profile_nsys, nsys_args=nsys_launch_args,
-            nsys_output_prefix=scenario_dir / 'profiles' / 'nsys_server'
+            nsys_output_prefix=scenario_dir / 'profiles' / f'nsys_{scenario_slug}_conc{concurrencies[0]}'
         )
 
         if not self.server_process or not self._wait_for_server(port):
@@ -608,7 +690,7 @@ class VLLMBenchmark:
             nsys_started_event = None
             nsys_stopped_event = None
             if profile_nsys:
-                nsys_file = (scenario_dir / 'profiles' / f"nsys_conc{concurrency}").resolve()
+                nsys_file = (scenario_dir / 'profiles' / f"nsys_{scenario_slug}_conc{concurrency}").resolve()
                 nsys_start_args = scenario.get('profiling', {}).get('nsys_start_args', '--force-overwrite=true')
                 nsys_stopped_event = threading.Event()
 
