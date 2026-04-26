@@ -1,6 +1,10 @@
 #!/usr/bin/env python3
 """
 vllm_bench.py - Scenario-based vLLM benchmarking tool
+
+- Optional per-scenario model: set `model` or `model_name` in a scenario (override for `vllm serve` / `vllm bench`).
+- One or more config files as positional args: `vllm_bench.py a.yaml b.yaml` runs a full study per file.
+- MLflow: a parent run for the study plus a nested run after each scenario (and final study_dir + metadata on the parent).
 """
 
 import argparse
@@ -63,6 +67,7 @@ class VLLMBenchmark:
         self._stderr_log_handle = None
         self._stdout_original = None
         self._stderr_original = None
+        self._mlflow_parent_active = False
         self.run_log_path = self.study_dir / "logs" / "benchmark_output.log"
         self.stderr_log_path = self.study_dir / "logs" / "benchmark_stderr.log"
         self.command_file_path = self.study_dir / "metadata" / "command.txt"
@@ -77,6 +82,14 @@ class VLLMBenchmark:
     def _sanitize_name(name: str) -> str:
         """Return filesystem-safe scenario identifier."""
         return "".join(ch if ch.isalnum() or ch in "-_." else "_" for ch in name)
+
+    def _effective_model_name(self, scenario: Optional[Dict[str, Any]] = None) -> str:
+        """Model for a scenario: scenario['model'] or 'model_name' overrides config default."""
+        if scenario:
+            override = scenario.get("model") or scenario.get("model_name")
+            if override is not None and str(override).strip():
+                return str(override).strip()
+        return str(self.config["model"]["name"])
 
     def _setup_run_logging(self):
         """Capture stdout to run log; route stderr to dedicated file."""
@@ -210,50 +223,128 @@ class VLLMBenchmark:
         except Exception as exc:
             self.os_release_file_path.write_text(f"Failed to read /etc/os-release: {exc}\n")
 
-    def _log_mlflow_artifacts(self):
-        """Upload run artifacts to MLflow."""
-        if not self.enable_mlflow:
-            print("ℹ️  MLflow upload disabled")
-            return
-
-        try:
-            import mlflow  # type: ignore
-        except ImportError:
-            print("⚠️  MLflow not installed. Skipping MLflow upload.")
-            return
+    def _mlflow_set_tracking(self):
+        """Set MLflow tracking URI and experiment. Caller must have imported mlflow."""
+        import mlflow  # type: ignore
 
         if self.mlflow_tracking_uri:
             mlflow.set_tracking_uri(self.mlflow_tracking_uri)
         if self.mlflow_experiment:
             mlflow.set_experiment(self.mlflow_experiment)
 
-        run_name = self.mlflow_run_name or self.study_dir.name
-        print(f"📤 Uploading artifacts to MLflow (run: {run_name})")
+    def _mlflow_set_tracking_uri_only(self):
+        """Re-apply only the tracking URI (for nested run helpers while a parent is active)."""
+        import mlflow  # type: ignore
 
-        with mlflow.start_run(run_name=run_name):
-            if self.mlflow_tags:
-                mlflow.set_tags(self.mlflow_tags)
-            mlflow.log_param("model_name", self.config["model"]["name"])
+        if self.mlflow_tracking_uri:
+            mlflow.set_tracking_uri(self.mlflow_tracking_uri)
+
+    def _mlflow_begin_parent_run(self) -> bool:
+        """
+        Start a parent run for the study. Nested child runs (one per scenario) follow.
+        """
+        if not self.enable_mlflow:
+            return False
+        try:
+            import mlflow  # type: ignore
+        except ImportError:
+            print("⚠️  MLflow not installed. Skipping MLflow upload.")
+            return False
+
+        self._mlflow_set_tracking()
+
+        run_name = self.mlflow_run_name or self.study_dir.name
+        print(f"📤 MLflow parent run: {run_name}")
+
+        mlflow.start_run(run_name=run_name)
+        if self.mlflow_tags:
+            mlflow.set_tags(self.mlflow_tags)
+        mlflow.log_param("vllm_bench_parent_run", True)
+        mlflow.log_param("config_path", str(self.config_path.resolve()))
+        mlflow.log_param("study_dir", str(self.study_dir))
+        mlflow.log_param("default_model", self.config["model"]["name"])
+        mlflow.log_param("scenario_count", len(self.config["scenarios"]))
+        if self.scenario_filter:
+            mlflow.log_param("scenario_filter", ",".join(self.scenario_filter))
+        if self.nsys_delay is not None:
+            mlflow.log_param("nsys_delay_sec", self.nsys_delay)
+        if self.nsys_duration is not None:
+            mlflow.log_param("nsys_duration_sec", self.nsys_duration)
+        return True
+
+    def _mlflow_log_scenario_run(
+        self, scenario: Dict[str, Any], model_name: str, scenario_dir: Path
+    ):
+        """Nested MLflow run: upload one scenario’s directory right after it finishes."""
+        if not self.enable_mlflow:
+            return
+        try:
+            import mlflow  # type: ignore
+        except ImportError:
+            return
+
+        self._mlflow_set_tracking_uri_only()
+
+        sname = scenario.get("name", "unknown")
+        run_name = self._sanitize_name(sname)
+        print(f"📤 MLflow (scenario run): {run_name}")
+
+        with mlflow.start_run(
+            run_name=run_name,
+            nested=True,
+        ):
+            mlflow.set_tag("scenario", sname)
+            mlflow.log_param("model", model_name)
             mlflow.log_param("config_path", str(self.config_path.resolve()))
             mlflow.log_param("study_dir", str(self.study_dir))
-            mlflow.log_param("scenario_count", len(self.config["scenarios"]))
-            if self.scenario_filter:
-                mlflow.log_param("scenario_filter", ",".join(self.scenario_filter))
-            if self.nsys_delay is not None:
-                mlflow.log_param("nsys_delay_sec", self.nsys_delay)
-            if self.nsys_duration is not None:
-                mlflow.log_param("nsys_duration_sec", self.nsys_duration)
+            mlflow.log_param("scenario_name", sname)
+            if scenario_dir.is_dir():
+                mlflow.log_artifacts(str(scenario_dir), artifact_path="scenario")
 
-            # Requested uploads
-            mlflow.log_artifacts(str(self.study_dir), artifact_path="study_dir")
-            mlflow.log_artifact(str(self.nvidia_smi_file_path), artifact_path="system")
-            mlflow.log_artifact(str(self.lscpu_file_path), artifact_path="system")
-            mlflow.log_artifact(str(self.command_file_path), artifact_path="metadata")
-            mlflow.log_artifact(str(self.study_dir / "config.yaml"), artifact_path="metadata")
-            mlflow.log_artifact(str(self.run_log_path), artifact_path="logs")
-            mlflow.log_artifact(str(self.stderr_log_path), artifact_path="logs")
+    def _mlflow_log_study_artifacts(self):
+        """On the active (parent) run, log study-level files (no per-scenario dirs)."""
+        if not self.enable_mlflow:
+            return
+        try:
+            import mlflow  # type: ignore
+        except ImportError:
+            return
 
-        print("✅ MLflow upload complete")
+        self._mlflow_set_tracking_uri_only()
+
+        for path, ap in (
+            (self.nvidia_smi_file_path, "system"),
+            (self.lscpu_file_path, "system"),
+            (self.command_file_path, "metadata"),
+            (self.study_dir / "config.yaml", "metadata"),
+            (self.run_log_path, "logs"),
+            (self.stderr_log_path, "logs"),
+        ):
+            p = Path(path)
+            if p.is_file():
+                mlflow.log_artifact(str(p), artifact_path=ap)
+        summ = self.study_dir / "summary.csv"
+        if summ.is_file():
+            mlflow.log_artifact(str(summ), artifact_path="results")
+        # Full study tree (same as legacy single end-upload); per-scenario nested runs
+        # already log each `scenario_*` for incremental progress.
+        mlflow.log_artifacts(str(self.study_dir), artifact_path="study_dir")
+
+    def _mlflow_end_parent_run(self):
+        """Log study-level artifacts and close the parent run."""
+        if not self.enable_mlflow:
+            return
+        try:
+            import mlflow  # type: ignore
+        except ImportError:
+            return
+
+        self._mlflow_set_tracking_uri_only()
+        print("📤 MLflow: finalizing parent run (study metadata + summary)")
+        self._mlflow_log_study_artifacts()
+        # Active run should still be the parent; nested children were closed by their with-blocks.
+        mlflow.end_run()
+        print("✅ MLflow parent run complete")
 
     def _load_config(self) -> Dict[str, Any]:
         """Load and validate scenario-based config."""
@@ -359,12 +450,13 @@ class VLLMBenchmark:
         port: int,
         params: List[str],
         log_file: Path,
+        model_name: Optional[str] = None,
         nsys_profile: bool = False,
         nsys_args: str = "",
         nsys_output_prefix: Optional[Path] = None
     ) -> tuple[Optional[subprocess.Popen], Optional[str]]:
         """Start vLLM server. Returns (process, nsys_session_id)."""
-        model_name = self.config['model']['name']
+        model_name = (model_name or self.config['model']['name'])
 
         use_session_mode = False
         cmd = []
@@ -550,10 +642,11 @@ class VLLMBenchmark:
         output_len: int,
         result_file: Path,
         bench_log_file: Path,
+        model_name: Optional[str] = None,
         enable_profiling: bool = False
     ) -> tuple[str, int]:
         """Run vLLM benchmark."""
-        model_name = self.config['model']['name']
+        model_name = (model_name or self.config['model']['name'])
 
         cmd = [
             "vllm", "bench", "serve",
@@ -594,8 +687,8 @@ class VLLMBenchmark:
         print(f"✅ Concurrency {concurrency} complete: {status} ({runtime}s)")
         return status, runtime
 
-    def _run_scenario(self, scenario: Dict):
-        """Run a single scenario."""
+    def _run_scenario(self, scenario: Dict) -> str:
+        """Run a single scenario. Returns the effective model name for this scenario."""
         scenario_name = scenario['name']
         scenario_slug = self._sanitize_name(scenario_name)
         print("\n" + "=" * 50)
@@ -615,6 +708,11 @@ class VLLMBenchmark:
         base_params = self.config['model'].get('base_params', '')
         scenario_params = scenario.get('params', '')
         full_params = f"{base_params} {scenario_params}".strip().split()
+
+        model_name = self._effective_model_name(scenario)
+        print(f"🎯 Model: {model_name}")
+        if model_name != str(self.config["model"]["name"]):
+            print(f"   (overrides default {self.config['model']['name']!r})")
 
         # Handle compilation config
         if 'compilation_config' in scenario:
@@ -664,7 +762,7 @@ class VLLMBenchmark:
 
         # Start server
         self.server_process, nsys_session_id = self._start_server(
-            scenario_name, port, full_params, log_file,
+            scenario_name, port, full_params, log_file, model_name=model_name,
             nsys_profile=profile_nsys, nsys_args=nsys_launch_args,
             nsys_output_prefix=scenario_dir / 'profiles' / f'nsys_{scenario_slug}_conc{concurrencies[0]}'
         )
@@ -673,7 +771,7 @@ class VLLMBenchmark:
             print(f"❌ Failed to start server for scenario: {scenario_name}")
             if self.server_process:
                 self._stop_server(self.server_process)
-            return
+            return model_name
 
         # Run benchmarks for each concurrency
         for concurrency in concurrencies:
@@ -751,6 +849,7 @@ class VLLMBenchmark:
             status, runtime = self._run_benchmark(
                 scenario_name, port, concurrency, num_prompts,
                 input_len, output_len, result_file, bench_log_file,
+                model_name=model_name,
                 enable_profiling=torch_enabled
             )
 
@@ -792,6 +891,7 @@ class VLLMBenchmark:
             # Record summary
             self.summary_data.append({
                 'scenario': scenario_name,
+                'model': model_name,
                 'port': port,
                 'concurrency': concurrency,
                 'num_prompts': num_prompts,
@@ -802,16 +902,22 @@ class VLLMBenchmark:
 
         # Stop server
         self._stop_server(self.server_process)
+        return model_name
 
     def run(self):
         """Run all scenarios."""
+        self._mlflow_parent_active = False
         try:
             self._setup_run_logging()
             self._capture_command_and_system_info()
 
             print("🚀 vLLM Scenario Benchmark")
-            print(f"🎯 Model: {self.config['model']['name']}")
+            print(f"🎯 Default model: {self.config['model']['name']}")
+            print("   (per-scenario override: set `model` or `model_name` in the scenario)")
             print(f"📊 Scenarios: {len(self.config['scenarios'])}")
+
+            if self._mlflow_begin_parent_run():
+                self._mlflow_parent_active = True
 
             # Apply global environment variables
             env_defaults = self.config.get('defaults', {}).get('env', {})
@@ -821,14 +927,19 @@ class VLLMBenchmark:
             summary_file = self.study_dir / 'summary.csv'
             with open(summary_file, 'w', newline='') as f:
                 writer = csv.DictWriter(f, fieldnames=[
-                    'scenario', 'port', 'concurrency', 'num_prompts',
+                    'scenario', 'model', 'port', 'concurrency', 'num_prompts',
                     'status', 'runtime_sec', 'result_file'
                 ])
                 writer.writeheader()
 
-            # Run each scenario
+            # Run each scenario; MLflow child run (nested) after each
             for scenario in self.config['scenarios']:
                 self._run_scenario(scenario)
+                if self._mlflow_parent_active:
+                    sdir = self.study_dir / f"scenario_{scenario['name']}"
+                    self._mlflow_log_scenario_run(
+                        scenario, self._effective_model_name(scenario), sdir
+                    )
         except KeyboardInterrupt:
             print("\n⚠️  Interrupted by user")
             if self.server_process:
@@ -846,7 +957,9 @@ class VLLMBenchmark:
                         writer = csv.DictWriter(f, fieldnames=self.summary_data[0].keys())
                         writer.writeheader()
                         writer.writerows(self.summary_data)
-                self._log_mlflow_artifacts()
+                if self._mlflow_parent_active:
+                    self._mlflow_end_parent_run()
+                    self._mlflow_parent_active = False
             finally:
                 self._teardown_run_logging()
 
@@ -874,7 +987,11 @@ def main():
         description="vLLM scenario-based benchmark tool",
         formatter_class=argparse.RawDescriptionHelpFormatter
     )
-    parser.add_argument('config', help='Path to scenario config YAML file')
+    parser.add_argument(
+        'config',
+        nargs='+',
+        help='Path(s) to scenario config YAML. Each file is one benchmark run (separate study directory), in order.',
+    )
     parser.add_argument(
         '--scenario', '--scenarios',
         dest='scenarios',
@@ -926,23 +1043,31 @@ def main():
     except ValueError as e:
         parser.error(str(e))
 
-    try:
-        benchmark = VLLMBenchmark(
-            args.config,
-            scenario_filter,
-            nsys_delay=args.delay,
-            nsys_duration=args.duration,
-            enable_mlflow=not args.no_mlflow,
-            mlflow_experiment=args.mlflow_experiment,
-            mlflow_run_name=args.mlflow_run_name,
-            mlflow_tracking_uri=args.mlflow_tracking_uri,
-            mlflow_tags=mlflow_tags,
-            cli_command=sys.argv
-        )
-        benchmark.run()
-    except Exception as e:
-        print(f"❌ Fatal error: {e}", file=sys.stderr)
-        sys.exit(1)
+    exit_code = 0
+    n_config = len(args.config)
+    for k, config_path in enumerate(args.config):
+        if n_config > 1:
+            print(f"\n======== Config {k + 1}/{n_config}: {config_path} ========\n")
+        try:
+            benchmark = VLLMBenchmark(
+                config_path,
+                scenario_filter,
+                nsys_delay=args.delay,
+                nsys_duration=args.duration,
+                enable_mlflow=not args.no_mlflow,
+                mlflow_experiment=args.mlflow_experiment,
+                mlflow_run_name=args.mlflow_run_name,
+                mlflow_tracking_uri=args.mlflow_tracking_uri,
+                mlflow_tags=mlflow_tags,
+                cli_command=sys.argv,
+            )
+            benchmark.run()
+        except Exception as e:
+            print(f"❌ Fatal error (config: {config_path!r}): {e}", file=sys.stderr)
+            exit_code = 1
+            break
+    if exit_code:
+        sys.exit(exit_code)
 
 
 if __name__ == '__main__':
