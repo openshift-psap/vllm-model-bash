@@ -1,0 +1,48 @@
+# Per-model configuration with scenarios
+model:
+  name: meta-llama/Llama-3.1-8B-Instruct
+  base_params: "--max-model-len 8192 --gpu-memory-utilization 0.9"
+
+# Global defaults for all scenarios in this model
+defaults:
+  bench:
+    concurrencies: [1, 2]
+    input_len:  128
+    output_len: 128
+    cc_mult:    10
+    result_prefix: results
+  env:
+    HF_HOME: "/mnt/data"
+    HF_TOKEN: ""
+    HF_HUB_OFFLINE: "1"
+    TORCH_CUDA_ARCH_LIST: "9.0"
+    CUDA_VISIBLE_DEVICES: "0"
+    VLLM_NVTX_SCOPES_FOR_PROFILING: "1"
+  study_dir: "Study_Test_Profile"
+
+scenarios:
+  # Scenario 1: Baseline (no special flags)
+  - name: baseline
+    port: 8000
+    params: "--async-scheduling"
+    bench:
+      result_prefix: "measure_baseline"
+
+  # Scenario 2: Profiling with torch profiler + nsys
+  - name: profile_with_torch
+    port: 8000
+    params: "--max-num-seq 512 --async-scheduling"
+    profile: true
+    bench:
+      concurrencies: [1, 2]  # Override for profiling
+      result_prefix: "profile_async_cudagraph"
+    profiling:
+      nsys_launch_args: "--trace=cuda,nvtx,osrt --start-later=true --cuda-graph-trace=node"
+      nsys_start_args: "--force-overwrite=true --gpu-metrics-devices=cuda-visible"
+      torch_profiler:
+        enabled: true
+        record_shapes: true
+        profile_memory: true
+        with_stack: false
+        with_flops: false
+
