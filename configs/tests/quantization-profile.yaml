@@ -1,0 +1,270 @@
+# Per-model configuration with scenarios
+model:
+  name: meta-llama/Llama-3.1-8B-Instruct
+  base_params: "--max-model-len 8192 --gpu-memory-utilization 0.9 --no-enable-prefix-caching"
+
+# Global defaults for all scenarios in this model
+defaults:
+  bench:
+    concurrencies: [1, 2, 4, 8, 16, 32, 64, 128]
+    input_len:  128
+    output_len: 128
+    cc_mult:    10
+    result_prefix: results
+  env:
+    HF_HOME: "/mnt/data"
+    HF_TOKEN: ""
+    HF_HUB_OFFLINE: "1"
+    TORCH_CUDA_ARCH_LIST: "9.0"
+    CUDA_VISIBLE_DEVICES: "0"
+    VLLM_NVTX_SCOPES_FOR_PROFILING: "1"
+  study_dir: "Study_Quantization_Profile_PrefixCacheOff_LowerCCMult"
+
+scenarios:
+  # Scenario 1: Baseline (no special flags)
+  - name: prefill_128ISL_1OSL
+    model_name:  meta-llama/Llama-3.1-8B-Instruct
+    port: 8000
+    profile: true
+    params: "--async-scheduling"
+    bench:
+      input_len:  128
+      output_len: 1
+      result_prefix: "measure_prefill_128ISL_1OSL"
+    profiling:
+      nsys_launch_args: "--trace=cuda,nvtx,osrt --start-later=true --cuda-graph-trace=node"
+      nsys_start_args: "--force-overwrite=true --gpu-metrics-devices=cuda-visible"
+  - name: prefill_512ISL_1OSL
+    model_name:  meta-llama/Llama-3.1-8B-Instruct
+    port: 8000
+    profile: true
+    params: "--async-scheduling"
+    bench:
+      input_len:  512
+      output_len: 1
+      result_prefix: "measure_prefill_512ISL_1OSL"
+    profiling:
+      nsys_launch_args: "--trace=cuda,nvtx,osrt --start-later=true --cuda-graph-trace=node"
+      nsys_start_args: "--force-overwrite=true --gpu-metrics-devices=cuda-visible"
+  - name: prefill_1024ISL_1OSL
+    model_name:  meta-llama/Llama-3.1-8B-Instruct
+    port: 8000
+    profile: true
+    params: "--async-scheduling"
+    bench:
+      input_len:  1024
+      output_len: 1
+      result_prefix: "measure_prefill_1024ISL_1OSL"
+    profiling:
+      nsys_launch_args: "--trace=cuda,nvtx,osrt --start-later=true --cuda-graph-trace=node"
+      nsys_start_args: "--force-overwrite=true --gpu-metrics-devices=cuda-visible"
+  - name: prefill_2048ISL_1OSL
+    model_name:  meta-llama/Llama-3.1-8B-Instruct
+    port: 8000
+    profile: true
+    params: "--async-scheduling"
+    bench:
+      input_len:  2048
+      output_len: 1
+      result_prefix: "measure_prefill_2048ISL_1OSL"
+    profiling:
+      nsys_launch_args: "--trace=cuda,nvtx,osrt --start-later=true --cuda-graph-trace=node"
+      nsys_start_args: "--force-overwrite=true --gpu-metrics-devices=cuda-visible"
+  - name: prefill_4096ISL_1OSL
+    model_name:  meta-llama/Llama-3.1-8B-Instruct
+    port: 8000
+    profile: true
+    params: "--async-scheduling"
+    bench:
+      input_len:  4096
+      output_len: 1
+      result_prefix: "measure_prefill_4096ISL_1OSL"
+    profiling:
+      nsys_launch_args: "--trace=cuda,nvtx,osrt --start-later=true --cuda-graph-trace=node"
+      nsys_start_args: "--force-overwrite=true --gpu-metrics-devices=cuda-visible"
+
+  # Scenario 1: Baseline (no special flags)
+  - name: prefill_fp8_128ISL_1OSL
+    model_name:  RedHatAI/Meta-Llama-3.1-8B-Instruct-FP8  
+    port: 8000
+    profile: true
+    params: "--async-scheduling"
+    bench:
+      input_len:  128
+      output_len: 1
+      result_prefix: "measure_prefill_fp8_128ISL_1OSL"
+    profiling:
+      nsys_launch_args: "--trace=cuda,nvtx,osrt --start-later=true --cuda-graph-trace=node"
+      nsys_start_args: "--force-overwrite=true --gpu-metrics-devices=cuda-visible"
+  - name: prefill_fp8_512ISL_1OSL
+    model_name:  RedHatAI/Meta-Llama-3.1-8B-Instruct-FP8  
+    port: 8000
+    profile: true
+    params: "--async-scheduling"
+    bench:
+      input_len:  512
+      output_len: 1
+      result_prefix: "measure_prefill_fp8_512ISL_1OSL"
+    profiling:
+      nsys_launch_args: "--trace=cuda,nvtx,osrt --start-later=true --cuda-graph-trace=node"
+      nsys_start_args: "--force-overwrite=true --gpu-metrics-devices=cuda-visible"
+  - name: prefill_fp8_1024ISL_1OSL
+    model_name:  RedHatAI/Meta-Llama-3.1-8B-Instruct-FP8  
+    port: 8000
+    profile: true
+    params: "--async-scheduling"
+    bench:
+      input_len:  1024
+      output_len: 1
+      result_prefix: "measure_prefill_fp8_1024ISL_1OSL"
+    profiling:
+      nsys_launch_args: "--trace=cuda,nvtx,osrt --start-later=true --cuda-graph-trace=node"
+      nsys_start_args: "--force-overwrite=true --gpu-metrics-devices=cuda-visible"
+  - name: prefill_fp8_2048ISL_1OSL
+    model_name:  RedHatAI/Meta-Llama-3.1-8B-Instruct-FP8  
+    port: 8000
+    profile: true
+    params: "--async-scheduling"
+    bench:
+      input_len:  2048
+      output_len: 1
+      result_prefix: "measure_prefill_fp8_2048ISL_1OSL"
+    profiling:
+      nsys_launch_args: "--trace=cuda,nvtx,osrt --start-later=true --cuda-graph-trace=node"
+      nsys_start_args: "--force-overwrite=true --gpu-metrics-devices=cuda-visible"
+  - name: prefill_fp8_4096ISL_1OSL
+    model_name:  RedHatAI/Meta-Llama-3.1-8B-Instruct-FP8  
+    port: 8000
+    profile: true
+    params: "--async-scheduling"
+    bench:
+      input_len:  4096
+      output_len: 1
+      result_prefix: "measure_prefill_fp8_4096ISL_1OSL"
+    profiling:
+      nsys_launch_args: "--trace=cuda,nvtx,osrt --start-later=true --cuda-graph-trace=node"
+      nsys_start_args: "--force-overwrite=true --gpu-metrics-devices=cuda-visible"
+
+  # Scenario 1: Baseline (no special flags)
+  - name: decode_128OSL_32ISL
+    model_name:  meta-llama/Llama-3.1-8B-Instruct
+    port: 8000
+    profile: true
+    params: "--async-scheduling"
+    bench:
+      output_len:  128
+      input_len: 32
+      result_prefix: "measure_decode_128OSL_32ISL"
+    profiling:
+      nsys_launch_args: "--trace=cuda,nvtx,osrt --start-later=true --cuda-graph-trace=node"
+      nsys_start_args: "--force-overwrite=true --gpu-metrics-devices=cuda-visible"
+  - name: decode_512OSL_32ISL
+    model_name:  meta-llama/Llama-3.1-8B-Instruct
+    port: 8000
+    profile: true
+    params: "--async-scheduling"
+    bench:
+      output_len:  512
+      input_len: 32
+      result_prefix: "measure_decode_512OSL_32ISL"
+    profiling:
+      nsys_launch_args: "--trace=cuda,nvtx,osrt --start-later=true --cuda-graph-trace=node"
+      nsys_start_args: "--force-overwrite=true --gpu-metrics-devices=cuda-visible"
+  - name: decode_1024OSL_32ISL
+    model_name:  meta-llama/Llama-3.1-8B-Instruct
+    port: 8000
+    profile: true
+    params: "--async-scheduling"
+    bench:
+      output_len:  1024
+      input_len: 32
+      result_prefix: "measure_decode_1024OSL_32ISL"
+    profiling:
+      nsys_launch_args: "--trace=cuda,nvtx,osrt --start-later=true --cuda-graph-trace=node"
+      nsys_start_args: "--force-overwrite=true --gpu-metrics-devices=cuda-visible"
+  - name: decode_2048OSL_32ISL
+    model_name:  meta-llama/Llama-3.1-8B-Instruct
+    port: 8000
+    profile: true
+    params: "--async-scheduling"
+    bench:
+      output_len:  2048
+      input_len: 32
+      result_prefix: "measure_decode_2048OSL_32ISL"
+    profiling:
+      nsys_launch_args: "--trace=cuda,nvtx,osrt --start-later=true --cuda-graph-trace=node"
+      nsys_start_args: "--force-overwrite=true --gpu-metrics-devices=cuda-visible"
+  - name: decode_4096OSL_32ISL
+    model_name:  meta-llama/Llama-3.1-8B-Instruct
+    port: 8000
+    profile: true
+    params: "--async-scheduling"
+    bench:
+      output_len:  4096
+      input_len: 32
+      result_prefix: "measure_decode_4096OSL_32ISL"
+    profiling:
+      nsys_launch_args: "--trace=cuda,nvtx,osrt --start-later=true --cuda-graph-trace=node"
+      nsys_start_args: "--force-overwrite=true --gpu-metrics-devices=cuda-visible"
+
+  # Scenario 1: Baseline (no special flags)
+  - name: decode_fp8_128OSL_32ISL
+    model_name:  RedHatAI/Meta-Llama-3.1-8B-Instruct-FP8  
+    port: 8000
+    profile: true
+    params: "--async-scheduling"
+    bench:
+      output_len:  128
+      input_len: 32
+      result_prefix: "measure_decode_fp8_128OSL_32ISL"
+    profiling:
+      nsys_launch_args: "--trace=cuda,nvtx,osrt --start-later=true --cuda-graph-trace=node"
+      nsys_start_args: "--force-overwrite=true --gpu-metrics-devices=cuda-visible"
+  - name: decode_fp8_512OSL_32ISL
+    model_name:  RedHatAI/Meta-Llama-3.1-8B-Instruct-FP8  
+    port: 8000
+    profile: true
+    params: "--async-scheduling"
+    bench:
+      output_len:  512
+      input_len: 32
+      result_prefix: "measure_decode_fp8_512OSL_32ISL"
+    profiling:
+      nsys_launch_args: "--trace=cuda,nvtx,osrt --start-later=true --cuda-graph-trace=node"
+      nsys_start_args: "--force-overwrite=true --gpu-metrics-devices=cuda-visible"
+  - name: decode_fp8_1024OSL_32ISL
+    model_name:  RedHatAI/Meta-Llama-3.1-8B-Instruct-FP8  
+    port: 8000
+    profile: true
+    params: "--async-scheduling"
+    bench:
+      output_len:  1024
+      input_len: 32
+      result_prefix: "measure_decode_fp8_1024OSL_32ISL"
+    profiling:
+      nsys_launch_args: "--trace=cuda,nvtx,osrt --start-later=true --cuda-graph-trace=node"
+      nsys_start_args: "--force-overwrite=true --gpu-metrics-devices=cuda-visible"
+  - name: decode_fp8_2048OSL_32ISL
+    model_name:  RedHatAI/Meta-Llama-3.1-8B-Instruct-FP8  
+    port: 8000
+    profile: true
+    params: "--async-scheduling"
+    bench:
+      output_len:  2048
+      input_len: 32
+      result_prefix: "measure_decode_fp8_2048OSL_32ISL"
+    profiling:
+      nsys_launch_args: "--trace=cuda,nvtx,osrt --start-later=true --cuda-graph-trace=node"
+      nsys_start_args: "--force-overwrite=true --gpu-metrics-devices=cuda-visible"
+  - name: decode_fp8_4096OSL_32ISL
+    model_name:  RedHatAI/Meta-Llama-3.1-8B-Instruct-FP8  
+    port: 8000
+    profile: true
+    params: "--async-scheduling"
+    bench:
+      output_len:  4096
+      input_len: 32
+      result_prefix: "measure_decode_fp8_4096OSL_32ISL"
+    profiling:
+      nsys_launch_args: "--trace=cuda,nvtx,osrt --start-later=true --cuda-graph-trace=node"
+      nsys_start_args: "--force-overwrite=true --gpu-metrics-devices=cuda-visible"

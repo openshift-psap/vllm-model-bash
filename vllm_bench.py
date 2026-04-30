@@ -5,12 +5,14 @@ vllm_bench.py - Scenario-based vLLM benchmarking tool
 - Optional per-scenario model: set `model` or `model_name` in a scenario (override for `vllm serve` / `vllm bench`).
 - One or more config files as positional args: `vllm_bench.py a.yaml b.yaml` runs a full study per file.
 - MLflow: a parent run for the study plus a nested run after each scenario (and final study_dir + metadata on the parent).
+  Nested runs also set tags from `logs/vllm_bench_conc*.log` (parsed Serving Benchmark Result table; keys like `c32_request_throughput`).
 """
 
 import argparse
 import csv
 import json
 import os
+import re
 import shlex
 import shutil
 import signal
@@ -20,10 +22,117 @@ import threading
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import requests
 import yaml
+
+
+# vLLM `vllm bench serve` may print 40+10 in source, or wider/padded columns in the real log; we parse
+# any `name:  <number>` line where the value is the last field (same as the user's sample).
+_MLFLOW_BENCH_LOG_END_EQ = re.compile(r"^={50}$")
+# Final field is a scalar; label is the vLLM metric name ending at the first ":" on the line
+# (sufficient for current bench output, including "Request throughput (req/s):"-style names).
+_MLFLOW_BENCH_KV = re.compile(
+    r"^(?P<label>.+?:)\s+(?P<val>"
+    r"[-+]?(?:\d+\.?\d*|\d*\.\d+)(?:[eE][-+]?\d+)?|"
+    r"inf|[-+]?inf|nan|[-+]?nan|Infinity|[-+]?Infinity"
+    r")\s*$"
+)
+
+
+def _bench_log_value_looks_scalar(val: str) -> bool:
+    t = val.strip()
+    if not t:
+        return False
+    if t.lower() in ("inf", "infinity", "+inf", "-inf", "nan", "+nan", "-nan"):
+        return True
+    try:
+        float(t)
+    except ValueError:
+        return False
+    return True
+
+
+def _label_to_bench_tag_key(label: str) -> str:
+    s = label.strip().rstrip(":")
+    s = re.sub(r"[^0-9a-zA-Z]+", "_", s, flags=re.IGNORECASE)
+    s = re.sub(r"_+", "_", s).strip("_").lower()
+    if not s:
+        s = "metric"
+    if s[0].isdigit() or s.startswith("_"):
+        s = f"m_{s}"
+    return s[:200]
+
+
+def _iter_bench_conc_log_files(logs_dir: Path) -> List[Tuple[int, Path]]:
+    out: List[Tuple[int, Path]] = []
+    for path in logs_dir.glob("vllm_bench_conc*.log"):
+        m = re.match(r"vllm_bench_conc(\d+)\.log$", path.name, re.IGNORECASE)
+        if m:
+            out.append((int(m.group(1)), path))
+    out.sort(key=lambda t: t[0])
+    return out
+
+
+def parse_vllm_bench_serving_log(text: str) -> Dict[str, str]:
+    """
+    Parse the last 'Serving Benchmark Result' section from a vllm_bench_conc*.log
+    and return key/value strings suitable for MLflow tags.
+    """
+    if "Serving Benchmark Result" not in text:
+        return {}
+    lines = text.splitlines()
+    start: Optional[int] = None
+    for i, line in enumerate(lines):
+        if "Serving Benchmark Result" in line:
+            start = i
+    if start is None:
+        return {}
+    out: Dict[str, str] = {}
+    for line in lines[start + 1 :]:
+        raw = line.rstrip("\n")
+        if _MLFLOW_BENCH_LOG_END_EQ.match(raw):
+            break
+        if len(raw) < 5:
+            continue
+        # Skip vLLM section break lines (no trailing scalar); real logs can be >50 columns wide
+        m = _MLFLOW_BENCH_KV.match(raw.strip())
+        if not m:
+            continue
+        label, val = m.group("label"), m.group("val")
+        if not label or not re.sub(r"[\s-]", "", label):
+            continue
+        if not _bench_log_value_looks_scalar(val):
+            continue
+        key = _label_to_bench_tag_key(label)
+        out[key] = val
+    return out
+
+
+def _bench_log_tags_for_scenario_dir(scenario_dir: Path) -> Dict[str, str]:
+    """
+    For each logs/vllm_bench_concN.log, parse the benchmark table and return tags
+    prefixed with cN_ (e.g. c32_request_throughput, c32_p50_ttft).
+    """
+    tags: Dict[str, str] = {}
+    logs_dir = scenario_dir / "logs"
+    if not logs_dir.is_dir():
+        return tags
+    parsed = 0
+    for conc, log_path in _iter_bench_conc_log_files(logs_dir):
+        try:
+            text = log_path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        row = parse_vllm_bench_serving_log(text)
+        if row:
+            parsed += 1
+        prefix = f"c{conc}_"
+        for k, v in row.items():
+            tags[prefix + k] = v
+    tags["bench_serving_log_files_parsed"] = str(parsed)
+    return tags
 
 
 class TeeStream:
@@ -294,6 +403,9 @@ class VLLMBenchmark:
             nested=True,
         ):
             mlflow.set_tag("scenario", sname)
+            log_tags = _bench_log_tags_for_scenario_dir(scenario_dir)
+            if log_tags:
+                mlflow.set_tags(log_tags)
             mlflow.log_param("model", model_name)
             mlflow.log_param("config_path", str(self.config_path.resolve()))
             mlflow.log_param("study_dir", str(self.study_dir))
