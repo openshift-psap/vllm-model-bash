@@ -7,11 +7,16 @@ Scenario-based benchmarking and profiling helpers for vLLM serving workloads.
 For each scenario in a YAML config, `vllm_bench.py`:
 
 1. Launches `vllm serve` with scenario-specific parameters.
-2. Runs `vllm bench serve` across one or more concurrency points.
+2. Runs the configured **benchmark backend** across one or more steps (see below).
 3. Saves benchmark JSON output and a cross-scenario summary CSV.
 4. Optionally collects:
    - Nsight Systems (`nsys`) traces
    - PyTorch Profiler traces
+
+**Benchmark backends** (`defaults.bench.engine` / per-scenario `bench.engine`):
+
+- **`vllm_bench`** (default): runs **`vllm bench serve`** once per entry in `bench.concurrencies`, with the same CLI shape as before GuideLLM support.
+- **`guidellm`**: runs **`guidellm benchmark`** using `bench.guidellm` (optional `env_path` / `executable` for a dedicated environment). See `configs/guidellm_synthetic_profiles.yaml`.
 
 This is useful for repeatable performance studies, regression tracking, and profiling runs.
 
@@ -44,6 +49,20 @@ Profiling tools (optional but recommended for GPU analysis):
 ```bash
 python vllm_bench.py <config.yaml> [--scenario name1,name2] [--delay SEC] [--duration SEC] [--mlflow-experiment NAME] [--mlflow-run-name NAME] [--mlflow-tracking-uri URI] [--mlflow-tag KEY=VALUE]
 ```
+
+### Quick checks (`vllm bench serve` unchanged by default)
+
+The default engine is **`vllm_bench`**. Omitting `bench.engine` matches historical behavior. Small configs under `configs/examples/` are meant for regression smoke tests:
+
+```bash
+# One concurrency, short sequences (~fastest GPU check)
+python vllm_bench.py configs/examples/vllm_bench_smoke.yaml --scenario smoke
+
+# Two concurrencies, two scenarios (exercises the per-concurrency loop + logs)
+python vllm_bench.py configs/examples/vllm_bench_multiconc.yaml
+```
+
+See `configs/examples/README.md` for a short index.
 
 ### Common Commands
 
@@ -99,6 +118,7 @@ defaults:
   env:
     VLLM_USE_V1: "1"
   bench:
+    # engine: vllm_bench   # optional; default is vllm_bench (vllm bench serve)
     concurrencies: [1, 8, 32]
     input_len: 1024
     output_len: 128
@@ -118,6 +138,8 @@ scenarios:
         enabled: true
 ```
 
+For **GuideLLM**, set `bench.engine: guidellm` and a `bench.guidellm` block (`env_path`, `data` or `profiles`, etc.); see `configs/guidellm_synthetic_profiles.yaml`.
+
 ## Output Layout
 
 Each run creates a timestamped study directory:
@@ -128,9 +150,12 @@ Each run creates a timestamped study directory:
   summary.csv
   scenario_<name>/
     logs/
-      vllm_server.log
+      vllm_server_<scenario_slug>.log
+      vllm_bench_conc<k>.log           # vllm_bench engine (one per concurrency)
+      guidellm_<profile_slug>.log      # guidellm engine (one per profile step)
     results/
-      <result_prefix>.json
+      <result_prefix>.json             # vllm bench (append across concurrencies)
+      <prefix>-<profile>.json          # guidellm (one file per profile)
     profiles/
       nsys_server.qdrep|.nsys-rep      # when using direct `nsys profile` mode
       nsys_conc<k>.qdrep|.nsys-rep     # when using start/stop session mode
@@ -139,10 +164,11 @@ Each run creates a timestamped study directory:
 ```
 
 Notes:
-- `summary.csv` aggregates every scenario/concurrency run.
+- `summary.csv` aggregates every benchmark step. Columns include `bench_engine` and `guidellm_profile` (empty when using `vllm_bench`).
 - Nsight output now writes under each scenario `profiles/` directory.
 - Exact Nsight extension varies by nsys version (`.qdrep` and/or `.nsys-rep`).
 - Run output is captured in `logs/benchmark_output.log`.
+- MLflow nested runs tag `bench_engine` and, for `vllm_bench`, parse metrics from `vllm_bench_conc*.log` into run tags when present.
 - MLflow upload includes the full study directory, `nvidia-smi`, `lscpu`, command metadata, config, and run log.
 
 ## Legacy Script

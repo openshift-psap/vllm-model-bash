@@ -1,0 +1,91 @@
+# -----------------------------------------------------------------------------
+# GuideLLM synthetic benchmarks (multi-profile), aligned with run_guidellm.sh
+# -----------------------------------------------------------------------------
+#
+# Usage (after editing env_path and model):
+#   python vllm_bench.py configs/guidellm_synthetic_profiles.yaml
+#
+# GuideLLM is often installed only inside a venv or conda env. Set exactly one of:
+#   - bench.guidellm.env_path  → root of that environment (uses bin/guidellm or bin/python -m guidellm)
+#   - bench.guidellm.executable → full path to the guidellm launcher script
+#
+# If neither is set, the driver looks up `guidellm` on PATH (same as plain shell).
+#
+# Target URL: defaults to http://127.0.0.1:{scenario.port}; override with guidellm.target
+# if your server binds elsewhere or needs a path suffix (check GuideLLM docs for your backend).
+# -----------------------------------------------------------------------------
+
+model:
+  name: meta-llama/Llama-3.1-8B-Instruct
+  base_params: >-
+    --max-model-len 16384
+    --gpu-memory-utilization 0.9
+
+defaults:
+  study_dir: "Study_GuideLLM_Synthetic"
+
+  bench:
+    engine: guidellm
+
+    # Re-use concurrencies as comma-separated --rate (like RATE=1,50,... in run_guidellm.sh).
+    # Override with guidellm.rate for a custom string or list.
+    concurrencies: [1, 50, 100, 200, 300, 500, 650]
+
+    guidellm:
+      # --- REQUIRED for isolated installs (expand to your machine) ---
+      # env_path: "/home/you/micromamba/envs/guidellm"
+      # env_path: "/home/you/.venvs/guidellm"
+      # executable: "/home/you/.venvs/guidellm/bin/guidellm"
+
+      # Server URL (optional; port still comes from each scenario)
+      target: "http://127.0.0.1:8000"
+
+      processor: null # null → same as model name for this scenario
+
+      rate_type: concurrent
+      max_seconds: 450
+
+      backend_kwargs:
+        timeout: 100000
+
+      # Prefix for result JSON files: <output_prefix>-<profile_slug>.json
+      output_prefix: synthetic
+
+      # Three synthetic profiles (same shapes as run_guidellm.sh PROFILE_DATA).
+      profiles:
+        - label: isl1000-osl1000
+          description: "Fixed 1k prompt / 1k output tokens per request"
+          data:
+            prompt_tokens: 1000
+            output_tokens: 1000
+
+        - label: isl512-osl2048-variable
+          description: "Variable-length prompts and long outputs (stdev + min/max)"
+          data:
+            prompt_tokens: 512
+            prompt_tokens_stdev: 128
+            prompt_tokens_min: 256
+            prompt_tokens_max: 1024
+            output_tokens: 2048
+            output_tokens_stdev: 512
+            output_tokens_min: 1024
+            output_tokens_max: 3072
+
+        - label: isl8000-osl1000
+          description: "Long context prefill with moderate decode; fewer samples"
+          data:
+            prompt_tokens: 8000
+            output_tokens: 1000
+            samples: 50
+
+scenarios:
+  - name: guidellm_synthetic_all_profiles
+    port: 8000
+    params: "" # add vLLM serve flags if needed
+    bench:
+      result_prefix: measure_synthetic
+      # Per-scenario overrides (optional):
+      # guidellm:
+      #   env_path: "/opt/conda/envs/bench"
+      #   max_seconds: 600
+      #   rate: "1,32,128"

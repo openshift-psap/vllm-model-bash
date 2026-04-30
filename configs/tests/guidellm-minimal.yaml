@@ -1,0 +1,35 @@
+# Minimal GuideLLM smoke test (single synthetic profile).
+#
+# For a dedicated environment (recommended):
+#   bench.guidellm.env_path: "/path/to/venv-or-conda-env"
+# The driver runs `<env>/bin/guidellm benchmark ...` if that file exists, otherwise
+# `<env>/bin/python -m guidellm benchmark ...`.
+#
+# To point at a specific launcher:
+#   bench.guidellm.executable: "/path/to/venv/bin/guidellm"
+
+model:
+  name: meta-llama/Llama-3.1-8B-Instruct
+  base_params: "--max-model-len 8192 --gpu-memory-utilization 0.9"
+
+defaults:
+  bench:
+    engine: guidellm
+    concurrencies: [1, 50, 100]
+    guidellm:
+      # env_path: "/path/to/your/guidellm-environment"
+      target: "http://127.0.0.1:8000"
+      max_seconds: 450
+      rate_type: concurrent
+      backend_kwargs:
+        timeout: 100000
+      data:
+        prompt_tokens: 512
+        output_tokens: 1
+  study_dir: "Study_GuideLLM_Test"
+
+scenarios:
+  - name: guidellm_smoke
+    port: 8000
+    bench:
+      result_prefix: measure_guidellm_smoke

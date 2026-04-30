@@ -4,14 +4,33 @@ vllm_bench.py - Scenario-based vLLM benchmarking tool
 
 - Optional per-scenario model: set `model` or `model_name` in a scenario (override for `vllm serve` / `vllm bench`).
 - One or more config files as positional args: `vllm_bench.py a.yaml b.yaml` runs a full study per file.
+- Benchmark backend: default `bench.engine` is `vllm_bench` (`vllm bench serve`). Set `bench.engine: guidellm` and
+  `bench.guidellm` to run `guidellm benchmark` instead (same server lifecycle). For a dedicated install, set
+  `bench.guidellm.env_path` to the venv/conda env root (uses `bin/guidellm` or `bin/python -m guidellm`), or
+  `bench.guidellm.executable` to the `guidellm` binary path. See `configs/guidellm_synthetic_profiles.yaml`.
 - MLflow: a parent run for the study plus a nested run after each scenario (and final study_dir + metadata on the parent).
-  Nested runs also set tags from `logs/vllm_bench_conc*.log` (parsed Serving Benchmark Result table; keys like `c32_request_throughput`).
+  Nested runs also set tags from `logs/vllm_bench_conc*.log` when using vLLM bench (parsed Serving Benchmark Result table).
 """
+
+# CSV columns (every summary row includes all keys; unused fields are empty strings).
+SUMMARY_CSV_FIELDNAMES = [
+    "scenario",
+    "model",
+    "port",
+    "concurrency",
+    "num_prompts",
+    "status",
+    "runtime_sec",
+    "result_file",
+    "bench_engine",
+    "guidellm_profile",
+]
 
 import argparse
 import csv
 import json
 import os
+import platform
 import re
 import shlex
 import shutil
@@ -403,6 +422,12 @@ class VLLMBenchmark:
             nested=True,
         ):
             mlflow.set_tag("scenario", sname)
+            _bdef = self.config.get("defaults", {}).get("bench", {})
+            _bsc = scenario.get("bench", {})
+            mlflow.set_tag(
+                "bench_engine",
+                str({**_bdef, **_bsc}.get("engine", "vllm_bench")).lower(),
+            )
             log_tags = _bench_log_tags_for_scenario_dir(scenario_dir)
             if log_tags:
                 mlflow.set_tags(log_tags)
@@ -744,6 +769,226 @@ class VLLMBenchmark:
             raise subprocess.CalledProcessError(return_code, cmd)
         return return_code
 
+    def _normalize_bench_engine(self, bench_config: Dict[str, Any]) -> str:
+        engine = str(bench_config.get("engine", "vllm_bench")).strip().lower()
+        if engine in ("vllm", "vllm_bench", "bench", "serve"):
+            return "vllm_bench"
+        if engine in ("guidellm", "guide_llm"):
+            return "guidellm"
+        raise ValueError(
+            f"Unknown bench.engine {engine!r}; use 'vllm_bench' or 'guidellm'."
+        )
+
+    def _resolve_guidellm_cmd_prefix(self, g: Dict[str, Any]) -> List[str]:
+        """
+        Return argv prefix to invoke GuideLLM: either [guidellm], [/env/bin/guidellm],
+        or [/env/bin/python, '-m', 'guidellm'] when only the env Python has the package.
+        """
+        exe = g.get("executable")
+        if exe:
+            p = Path(str(exe)).expanduser()
+            if not p.is_file():
+                raise ValueError(f"bench.guidellm.executable is not a file: {p}")
+            return [str(p.resolve())]
+
+        env_path = (
+            g.get("env_path")
+            or g.get("venv")
+            or g.get("venv_path")
+            or g.get("conda_env")
+        )
+        if env_path:
+            root = Path(str(env_path)).expanduser().resolve()
+            if not root.is_dir():
+                raise ValueError(f"bench.guidellm.env_path is not a directory: {root}")
+            if platform.system() == "Windows":
+                bind = root / "Scripts"
+                gw = bind / "guidellm.exe"
+                pythons = (bind / "python.exe", bind / "python3.exe")
+            else:
+                bind = root / "bin"
+                gw = bind / "guidellm"
+                pythons = (bind / "python", bind / "python3")
+            if gw.is_file():
+                return [str(gw.resolve())]
+            for pyexe in pythons:
+                if pyexe.is_file():
+                    return [str(pyexe.resolve()), "-m", "guidellm"]
+            raise ValueError(
+                f"GuideLLM not found under env_path {root}: expected {gw} "
+                f"or one of {pythons} with the `guidellm` package installed."
+            )
+
+        return ["guidellm"]
+
+    def _guidellm_rate_string(self, bench_config: Dict[str, Any]) -> str:
+        g = bench_config.get("guidellm") or {}
+        r = g.get("rate")
+        if r is not None and r != "":
+            if isinstance(r, (list, tuple)):
+                return ",".join(str(x) for x in r)
+            return str(r).strip()
+        conc = bench_config.get("concurrencies")
+        if conc:
+            return ",".join(str(x) for x in conc)
+        raise ValueError(
+            "GuideLLM requires bench.guidellm.rate or bench.concurrencies to build --rate."
+        )
+
+    def _build_vllm_bench_steps(
+        self, concurrencies: List[int], cc_mult: int, scenario_dir: Path
+    ) -> List[Dict[str, Any]]:
+        out: List[Dict[str, Any]] = []
+        for c in concurrencies:
+            out.append(
+                {
+                    "engine": "vllm_bench",
+                    "slug": f"conc{c}",
+                    "torch_suffix": f"conc{c}",
+                    "concurrency": c,
+                    "num_prompts": int(c * cc_mult),
+                    "log_file": scenario_dir / "logs" / f"vllm_bench_conc{c}.log",
+                }
+            )
+        return out
+
+    def _build_guidellm_bench_steps(
+        self,
+        bench_config: Dict[str, Any],
+        result_prefix: str,
+        scenario_dir: Path,
+    ) -> List[Dict[str, Any]]:
+        g = bench_config.get("guidellm")
+        if not isinstance(g, dict):
+            raise ValueError("bench.engine is 'guidellm' but bench.guidellm must be a mapping.")
+        out_pfx = g.get("output_prefix", result_prefix)
+        results_dir = scenario_dir / "results"
+        logs_dir = scenario_dir / "logs"
+        steps: List[Dict[str, Any]] = []
+        profiles = g.get("profiles")
+        if profiles:
+            if not isinstance(profiles, list):
+                raise ValueError("bench.guidellm.profiles must be a list.")
+            for i, p in enumerate(profiles):
+                if not isinstance(p, dict):
+                    raise ValueError(f"bench.guidellm.profiles[{i}] must be a mapping.")
+                label = p.get("label") or p.get("name") or f"profile{i}"
+                data = p.get("data")
+                if data is None:
+                    raise ValueError(f"bench.guidellm profile {label!r} missing 'data'.")
+                safe = self._sanitize_name(str(label))
+                out_name = f"{out_pfx}-{safe}.json"
+                steps.append(
+                    {
+                        "engine": "guidellm",
+                        "slug": f"g_{safe}",
+                        "torch_suffix": f"guidellm_{safe}",
+                        "label": str(label),
+                        "data": data,
+                        "log_file": logs_dir / f"guidellm_{safe}.log",
+                        "result_json": results_dir / out_name,
+                    }
+                )
+        else:
+            data = g.get("data")
+            if data is None:
+                raise ValueError(
+                    "GuideLLM needs bench.guidellm.data or bench.guidellm.profiles (non-empty)."
+                )
+            lbl = str(g.get("profile_label", "default"))
+            safe = self._sanitize_name(lbl)
+            raw_out = g.get("outputs")
+            if raw_out:
+                outputs_name = Path(str(raw_out)).name
+            else:
+                outputs_name = f"{out_pfx}.json" if lbl == "default" else f"{out_pfx}-{safe}.json"
+            steps.append(
+                {
+                    "engine": "guidellm",
+                    "slug": f"g_{safe}",
+                    "torch_suffix": f"guidellm_{safe}",
+                    "label": lbl,
+                    "data": data,
+                    "log_file": logs_dir / f"guidellm_{safe}.log",
+                    "result_json": results_dir / outputs_name,
+                }
+            )
+        return steps
+
+    def _run_guidellm_benchmark(
+        self,
+        port: int,
+        model_name: str,
+        bench_config: Dict[str, Any],
+        step: Dict[str, Any],
+        bench_log_file: Path,
+    ) -> Tuple[str, int]:
+        g = bench_config["guidellm"]
+        target = str(g.get("target") or f"http://127.0.0.1:{port}")
+        processor = str(g.get("processor") or model_name)
+        data = step["data"]
+        data_str = data if isinstance(data, str) else json.dumps(data)
+        rate = self._guidellm_rate_string(bench_config)
+        rate_type = str(g.get("rate_type", "concurrent"))
+        max_seconds = int(g.get("max_seconds", 450))
+        bk = g.get("backend_kwargs", {"timeout": 100000})
+        if isinstance(bk, str):
+            bk = json.loads(bk)
+        if not isinstance(bk, dict):
+            raise ValueError("bench.guidellm.backend_kwargs must be a mapping or JSON string.")
+        out_dir = step["result_json"].parent
+        outputs = step["result_json"].name
+        prefix = self._resolve_guidellm_cmd_prefix(g)
+        cmd: List[str] = prefix + [
+            "benchmark",
+            "--target",
+            target,
+            "--model",
+            model_name,
+            "--processor",
+            processor,
+            "--data",
+            data_str,
+            "--rate-type",
+            rate_type,
+            "--rate",
+            rate,
+            "--backend-kwargs",
+            json.dumps(bk),
+            "--max-seconds",
+            str(max_seconds),
+            "--output-dir",
+            str(out_dir),
+            "--outputs",
+            outputs,
+        ]
+        extra = g.get("extra_args")
+        if extra:
+            if isinstance(extra, str):
+                cmd.extend(shlex.split(extra))
+            else:
+                cmd.extend(str(x) for x in extra)
+        label = step.get("label", "default")
+        print(f"===== GuideLLM profile: {label} (rate={rate}) =====")
+        print(f"🧭 GuideLLM command: {shlex.join(prefix)} …")
+        print(f"📝 GuideLLM log: {bench_log_file}")
+        print(f"▶ Running: {shlex.join(cmd[:12])}{' …' if len(cmd) > 12 else ''}")
+        start_time = time.time()
+        try:
+            self._run_command_logged(
+                cmd,
+                check=True,
+                output_file=bench_log_file,
+                echo_to_stdout=False,
+                echo_to_stderr=False,
+            )
+            status = "success"
+        except subprocess.CalledProcessError:
+            status = "failed"
+        runtime = int(time.time() - start_time)
+        print(f"✅ GuideLLM ({label}) complete: {status} ({runtime}s)")
+        return status, runtime
+
     def _run_benchmark(
         self,
         scenario_name: str,
@@ -842,15 +1087,29 @@ class VLLMBenchmark:
         bench_defaults = defaults.get('bench', {})
         bench_config = {**bench_defaults, **scenario.get('bench', {})}
 
-        concurrencies = bench_config.get('concurrencies', [1, 32, 128])
-        if not concurrencies:
-            raise ValueError(f"Scenario '{scenario_name}' has empty concurrencies list")
+        bench_engine = self._normalize_bench_engine(bench_config)
+        print(f"🔧 Benchmark engine: {bench_engine}")
+
         input_len = bench_config.get('input_len', 2000)
         output_len = bench_config.get('output_len', 200)
         cc_mult = bench_config.get('cc_mult', 10)
         result_prefix = bench_config.get('result_prefix', f"scenario_{scenario_name}")
-
         result_file = scenario_dir / 'results' / f"{result_prefix}.json"
+        concurrencies = bench_config.get('concurrencies', [1, 32, 128])
+
+        if bench_engine == 'vllm_bench':
+            if not concurrencies:
+                raise ValueError(f"Scenario '{scenario_name}' has empty concurrencies list")
+            bench_steps = self._build_vllm_bench_steps(concurrencies, cc_mult, scenario_dir)
+        else:
+            bench_steps = self._build_guidellm_bench_steps(
+                bench_config, result_prefix, scenario_dir
+            )
+
+        first_step_slug = bench_steps[0]['slug']
+        guidellm_rate_str = (
+            self._guidellm_rate_string(bench_config) if bench_engine == 'guidellm' else ''
+        )
 
         # Profiling settings
         profile_nsys = scenario.get('profile', False)
@@ -876,7 +1135,7 @@ class VLLMBenchmark:
         self.server_process, nsys_session_id = self._start_server(
             scenario_name, port, full_params, log_file, model_name=model_name,
             nsys_profile=profile_nsys, nsys_args=nsys_launch_args,
-            nsys_output_prefix=scenario_dir / 'profiles' / f'nsys_{scenario_slug}_conc{concurrencies[0]}'
+            nsys_output_prefix=scenario_dir / 'profiles' / f'nsys_{scenario_slug}_{first_step_slug}'
         )
 
         if not self.server_process or not self._wait_for_server(port):
@@ -885,14 +1144,13 @@ class VLLMBenchmark:
                 self._stop_server(self.server_process)
             return model_name
 
-        # Run benchmarks for each concurrency
-        for concurrency in concurrencies:
-            num_prompts = concurrency * cc_mult
-            bench_log_file = scenario_dir / "logs" / f"vllm_bench_conc{concurrency}.log"
+        # Run benchmarks (vLLM: one step per concurrency; GuideLLM: one step per profile)
+        for step in bench_steps:
+            bench_log_file = step['log_file']
 
-            # Update torch profiler prefix for this concurrency
+            # Update torch profiler prefix for this step
             if torch_enabled:
-                os.environ['VLLM_TORCH_PROFILER_PREFIX'] = f"trace_conc{concurrency}"
+                os.environ['VLLM_TORCH_PROFILER_PREFIX'] = f"trace_{step['torch_suffix']}"
 
             # Setup nsys profiling (start in background if delay is specified)
             nsys_file = None
@@ -900,7 +1158,7 @@ class VLLMBenchmark:
             nsys_started_event = None
             nsys_stopped_event = None
             if profile_nsys:
-                nsys_file = (scenario_dir / 'profiles' / f"nsys_{scenario_slug}_conc{concurrency}").resolve()
+                nsys_file = (scenario_dir / 'profiles' / f"nsys_{scenario_slug}_{step['slug']}").resolve()
                 nsys_start_args = scenario.get('profiling', {}).get('nsys_start_args', '--force-overwrite=true')
                 nsys_stopped_event = threading.Event()
 
@@ -958,12 +1216,17 @@ class VLLMBenchmark:
                     start_nsys_profiling()
 
             # Run benchmark (starts immediately, concurrent with delayed nsys start if applicable)
-            status, runtime = self._run_benchmark(
-                scenario_name, port, concurrency, num_prompts,
-                input_len, output_len, result_file, bench_log_file,
-                model_name=model_name,
-                enable_profiling=torch_enabled
-            )
+            if step['engine'] == 'guidellm':
+                status, runtime = self._run_guidellm_benchmark(
+                    port, model_name, bench_config, step, bench_log_file
+                )
+            else:
+                status, runtime = self._run_benchmark(
+                    scenario_name, port, step['concurrency'], step['num_prompts'],
+                    input_len, output_len, result_file, bench_log_file,
+                    model_name=model_name,
+                    enable_profiling=torch_enabled
+                )
 
             # Stop nsys profiling (only if duration was not specified)
             if profile_nsys:
@@ -973,7 +1236,7 @@ class VLLMBenchmark:
                     if nsys_started_event and not nsys_started_event.is_set():
                         print(f"⏱️  Waiting for delayed nsys to start before duration timer kicks in...")
                         nsys_started_event.wait()
-                    print(f"⏱️  Benchmark completed. Waiting for duration-based nsys stop before next concurrency.")
+                    print(f"⏱️  Benchmark completed. Waiting for duration-based nsys stop before next step.")
                     if nsys_stop_timer and nsys_stopped_event:
                         wait_timeout = max(self.nsys_duration + 60, 120)
                         if not nsys_stopped_event.wait(timeout=wait_timeout):
@@ -996,20 +1259,33 @@ class VLLMBenchmark:
             # Report torch profiler output
             if torch_dir:
                 print(f"✅ Torch traces: {torch_dir}/")
-                trace_files = list(torch_dir.glob(f"trace_conc{concurrency}*"))
+                trace_files = list(torch_dir.glob(f"trace_{step['torch_suffix']}*"))
                 for f in trace_files:
                     print(f"    {f.name} ({f.stat().st_size} bytes)")
 
             # Record summary
+            if step['engine'] == 'vllm_bench':
+                row_conc = str(step['concurrency'])
+                row_prompts = str(step['num_prompts'])
+                row_result = str(result_file)
+                row_profile = ''
+            else:
+                row_conc = guidellm_rate_str
+                row_prompts = ''
+                row_result = str(step['result_json'])
+                row_profile = str(step['label'])
+
             self.summary_data.append({
                 'scenario': scenario_name,
                 'model': model_name,
                 'port': port,
-                'concurrency': concurrency,
-                'num_prompts': num_prompts,
+                'concurrency': row_conc,
+                'num_prompts': row_prompts,
                 'status': status,
                 'runtime_sec': runtime,
-                'result_file': str(result_file)
+                'result_file': row_result,
+                'bench_engine': step['engine'],
+                'guidellm_profile': row_profile,
             })
 
         # Stop server
@@ -1023,7 +1299,7 @@ class VLLMBenchmark:
             self._setup_run_logging()
             self._capture_command_and_system_info()
 
-            print("🚀 vLLM Scenario Benchmark")
+            print("🚀 Scenario benchmark (vLLM bench or GuideLLM)")
             print(f"🎯 Default model: {self.config['model']['name']}")
             print("   (per-scenario override: set `model` or `model_name` in the scenario)")
             print(f"📊 Scenarios: {len(self.config['scenarios'])}")
@@ -1038,10 +1314,7 @@ class VLLMBenchmark:
             # Setup summary file
             summary_file = self.study_dir / 'summary.csv'
             with open(summary_file, 'w', newline='') as f:
-                writer = csv.DictWriter(f, fieldnames=[
-                    'scenario', 'model', 'port', 'concurrency', 'num_prompts',
-                    'status', 'runtime_sec', 'result_file'
-                ])
+                writer = csv.DictWriter(f, fieldnames=SUMMARY_CSV_FIELDNAMES)
                 writer.writeheader()
 
             # Run each scenario; MLflow child run (nested) after each
@@ -1066,7 +1339,9 @@ class VLLMBenchmark:
                 summary_file = self.study_dir / 'summary.csv'
                 if self.summary_data:
                     with open(summary_file, 'w', newline='') as f:
-                        writer = csv.DictWriter(f, fieldnames=self.summary_data[0].keys())
+                        writer = csv.DictWriter(
+                            f, fieldnames=SUMMARY_CSV_FIELDNAMES, extrasaction='ignore'
+                        )
                         writer.writeheader()
                         writer.writerows(self.summary_data)
                 if self._mlflow_parent_active:
@@ -1096,7 +1371,7 @@ def main():
         return parsed
 
     parser = argparse.ArgumentParser(
-        description="vLLM scenario-based benchmark tool",
+        description="Scenario-based benchmarking (vLLM bench serve or GuideLLM)",
         formatter_class=argparse.RawDescriptionHelpFormatter
     )
     parser.add_argument(
