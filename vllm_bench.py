@@ -5,9 +5,10 @@ vllm_bench.py - Scenario-based vLLM benchmarking tool
 - Optional per-scenario model: set `model` or `model_name` in a scenario (override for `vllm serve` / `vllm bench`).
 - One or more config files as positional args: `vllm_bench.py a.yaml b.yaml` runs a full study per file.
 - Benchmark backend: default `bench.engine` is `vllm_bench` (`vllm bench serve`). Set `bench.engine: guidellm` and
-  `bench.guidellm` to run `guidellm benchmark` instead (same server lifecycle). For a dedicated install, set
-  `bench.guidellm.env_path` to the venv/conda env root (uses `bin/guidellm` or `bin/python -m guidellm`), or
-  `bench.guidellm.executable` to the `guidellm` binary path. See `configs/guidellm_synthetic_profiles.yaml`.
+  `bench.guidellm` to run `guidellm benchmark` instead (same server lifecycle). Optional `bench.guidellm.request_type`
+  maps to GuideLLM's `--request-type`; allowed strings are listed in `configs/guidellm_synthetic_profiles.yaml`.
+  For a dedicated install, set `bench.guidellm.env_path` to the venv/conda env root (uses `bin/guidellm` or
+  `bin/python -m guidellm`), or `bench.guidellm.executable` to the `guidellm` binary path.
 - MLflow: a parent run for the study plus a nested run after each scenario (and final study_dir + metadata on the parent).
   Nested runs also set tags from `logs/vllm_bench_conc*.log` when using vLLM bench (parsed Serving Benchmark Result table).
 """
@@ -45,6 +46,23 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import requests
 import yaml
+
+
+# GuideLLM `bench.guidellm.request_type` → `guidellm benchmark --request-type` (path or short name).
+_GUIDELLM_REQUEST_TYPES = frozenset(
+    {
+        "/pooling",
+        "/v1/audio/transcriptions",
+        "/v1/audio/translations",
+        "/v1/chat/completions",
+        "/v1/completions",
+        "/v1/responses",
+        "audio_transcriptions",
+        "audio_translations",
+        "chat_completions",
+        "text_completions",
+    }
+)
 
 
 # vLLM `vllm bench serve` may print 40+10 in source, or wider/padded columns in the real log; we parse
@@ -821,6 +839,23 @@ class VLLMBenchmark:
 
         return ["guidellm"]
 
+    @staticmethod
+    def _guidellm_request_type_for_cmd(g: Dict[str, Any]) -> Optional[str]:
+        """Resolve `guidellm benchmark --request-type` from `bench.guidellm.request_type`."""
+        raw = g.get("request_type")
+        if raw is None:
+            return None
+        s = str(raw).strip()
+        rt = s if s else None
+        if rt is None:
+            return None
+        if rt not in _GUIDELLM_REQUEST_TYPES:
+            allowed = ", ".join(sorted(_GUIDELLM_REQUEST_TYPES))
+            raise ValueError(
+                f"bench.guidellm.request_type must be one of: {allowed}. Got {rt!r}."
+            )
+        return rt
+
     def _guidellm_rate_string(self, bench_config: Dict[str, Any]) -> str:
         g = bench_config.get("guidellm") or {}
         r = g.get("rate")
@@ -930,6 +965,7 @@ class VLLMBenchmark:
         data_str = data if isinstance(data, str) else json.dumps(data)
         rate = self._guidellm_rate_string(bench_config)
         rate_type = str(g.get("rate_type", "concurrent"))
+        request_type = self._guidellm_request_type_for_cmd(g)
         max_seconds = int(g.get("max_seconds", 450))
         bk = g.get("backend_kwargs", {"timeout": 100000})
         if isinstance(bk, str):
@@ -949,6 +985,10 @@ class VLLMBenchmark:
             processor,
             "--data",
             data_str,
+        ]
+        if request_type:
+            cmd.extend(["--request-type", request_type])
+        cmd += [
             "--rate-type",
             rate_type,
             "--rate",
