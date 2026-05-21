@@ -37,6 +37,77 @@ Profiling tools (optional but recommended for GPU analysis):
 - Nsight Compute (`ncu`)
 - PyTorch Profiler (enabled through scenario config)
 
+## Dataset Generator
+
+Before running benchmarks you need a JSONL dataset. Use the included
+`dataset_generator/` tools to create guidellm-compatible datasets with
+configurable ISL/OSL distributions and prefix-caching behaviour — no GPU or
+running model required (only the tokenizer is downloaded).
+
+### Quick start
+
+```bash
+# Single shared prefix, uniform output tokens
+python dataset_generator/generate_dataset.py \
+  --model "meta-llama/Llama-3.1-8B-Instruct" \
+  --buckets "1-500:132,500-1000:1092,1000-2000:54,2000-4000:454,4000-8000:1955,8000-15000:7243,15000-30000:17" \
+  --prefix-ratio 0.8 \
+  --output dataset.jsonl
+
+# Production traffic profile — scale 411k real requests down to 50k prompts,
+# bucketed OSL distribution, 61% prefix ratio
+python dataset_generator/generate_dataset.py \
+  --model "meta-llama/Llama-3.1-8B-Instruct" \
+  --buckets "200-500:75,500-1000:285,1000-2000:591,2000-5000:110875,5000-10000:226250,10000-20000:46390,20000-50000:26804" \
+  --output-buckets "5-20:10308,20-50:185814,50-100:138520,100-200:49762,200-500:17092,500-1000:7383,1000-2000:2626,2000-5000:350" \
+  --prefix-ratio 0.61 \
+  --total 50000 \
+  --output dataset_production.jsonl
+
+# Split into warmup + run chunks
+python dataset_generator/split_dataset.py \
+  --input dataset.jsonl \
+  --chunk-size 1200 --num-chunks 9 --output-dir /mnt/results
+```
+
+Then pass the file to `vllm bench serve` or guidellm:
+
+```bash
+guidellm benchmark run --data /mnt/results/dataset.jsonl ...
+```
+
+See [`dataset_generator/README.md`](dataset_generator/README.md) for the full
+argument reference, flag-compatibility matrix, prefix-caching modes, and
+end-to-end workflow examples (including multi-prefix / Airbnb-style production
+profiles).
+
+### End-to-end example: generate → benchmark
+
+```bash
+# 1. Generate
+python dataset_generator/generate_dataset.py \
+  --model "meta-llama/Llama-3.1-8B-Instruct" \
+  --buckets "1-500:132,500-1000:1092,1000-2000:54,2000-4000:454,4000-8000:1955,8000-15000:7243,15000-30000:17" \
+  --prefix-ratio 0.8 \
+  --output /mnt/results/dataset.jsonl
+
+# 2. Split (8 rate chunks + 1 warmup)
+python dataset_generator/split_dataset.py \
+  --input /mnt/results/dataset.jsonl \
+  --chunk-size 1200 --num-chunks 9 --output-dir /mnt/results
+
+# 3. Benchmark
+python vllm_bench.py configs/models/gpt-oss-20b.yaml --scenario baseline
+```
+
+## Datasets (MLPerf)
+
+To download the standard MLPerf inference datasets:
+
+```bash
+bash download_mlperf_datasets.sh
+```
+
 ## Recommended Workflow (`vllm_bench.py`)
 
 ### CLI Syntax
@@ -157,4 +228,3 @@ bash vllm_bench.sh configs/models/gpt-oss-20b.yaml --scenario baseline
 ## Developer Notes
 
 For code flow and debugging notes, see `CODE_README.md`.
-
